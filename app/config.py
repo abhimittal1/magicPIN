@@ -42,6 +42,13 @@ def _get_csv(name: str, default: list[str]) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _is_placeholder_api_key(value: str) -> bool:
+    normalized = value.strip().lower()
+    if not normalized:
+        return True
+    return any(token in normalized for token in ["sk-your-", "your_openai_api_key", "replace_me", "here"])
+
+
 @dataclass(frozen=True)
 class Settings:
     openai_api_key: str
@@ -67,7 +74,7 @@ class Settings:
 
     @property
     def llm_enabled(self) -> bool:
-        return bool(self.openai_api_key)
+        return bool(self.openai_api_key) and not _is_placeholder_api_key(self.openai_api_key)
 
 
 @lru_cache(maxsize=1)

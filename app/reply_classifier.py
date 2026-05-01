@@ -17,10 +17,21 @@ STOP_PATTERNS = [
     r"opt.?out", r"mat bhejo", r"message mat", r"band karo", r"nahi chahiye",
     r"\bhatao\b", r"rok do", r"remove kar", r"mujhe mat",
 ]
-BUSY_PATTERNS = [r"busy", r"later", r"tomorrow", r"after some time", r"call later"]
-COMMIT_PATTERNS = [r"\byes\b", r"go ahead", r"let's do it", r"lets do it", r"send it", r"proceed", r"share it", r"what's next", r"whats next"]
-OFF_TOPIC_PATTERNS = [r"gst", r"tax", r"ca\b", r"payroll", r"rent agreement"]
 ABUSIVE_PATTERNS = [r"spam", r"idiot", r"stupid", r"useless"]
+BUSY_PATTERNS = [
+    r"\bbusy\b",
+    r"ping me later",
+    r"message me later",
+    r"call me later",
+    r"follow.?up later",
+    r"not now",
+    r"later\b",
+    r"baad mein",
+    r"abhi nahi",
+    r"after some time",
+    r"message me tomorrow",
+    r"talk later",
+]
 
 
 @dataclass(frozen=True)
@@ -30,6 +41,8 @@ class ReplyClassification:
 
 
 class ReplyClassifier:
+    """Deterministic fast-path for only the highest-confidence terminal replies."""
+
     def classify(self, message: str) -> ReplyClassification:
         text = message.strip().lower()
         if self._matches(ABUSIVE_PATTERNS, text):
@@ -39,15 +52,8 @@ class ReplyClassifier:
         if self._matches(AUTO_REPLY_PATTERNS, text):
             return ReplyClassification(kind="auto_reply", confidence=0.95)
         if self._matches(BUSY_PATTERNS, text):
-            return ReplyClassification(kind="later_busy", confidence=0.8)
-        if self._matches(OFF_TOPIC_PATTERNS, text):
-            return ReplyClassification(kind="off_topic", confidence=0.75)
-        if self._matches(COMMIT_PATTERNS, text):
-            return ReplyClassification(kind="explicit_yes_or_commit", confidence=0.9)
-        _hindi_q = any(text.startswith(w) for w in ("kaun", "kya", "kaise", "kyun", "kab", "kitna", "kaunsa", "kahan"))
-        if "?" in text or text.startswith(("what", "how", "when", "can", "why", "who")) or _hindi_q:
-            return ReplyClassification(kind="question", confidence=0.7)
-        return ReplyClassification(kind="ambiguous", confidence=0.4)
+            return ReplyClassification(kind="busy_wait", confidence=0.90)
+        return ReplyClassification(kind="ambiguous", confidence=0.0)
 
     def _matches(self, patterns: list[str], text: str) -> bool:
         return any(re.search(pattern, text) for pattern in patterns)

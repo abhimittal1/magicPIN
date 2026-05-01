@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app, compose_service, resolver, settings, store
 from app.evidence import EvidenceFact
+from app.schemas import LLMReplyDecision
 from app.schemas import ComposedMessage, MessagePlan, ResolvedContext
 from app.store import utc_now_iso
 from app.validator import MessageValidator
@@ -275,11 +276,22 @@ def test_reply_abusive_message_ends_and_suppresses() -> None:
 
 
 def test_reply_off_topic_redirects() -> None:
+    _seed_action_mode_contexts()
+    conversation_id = "conv_tax"
+    store.create_conversation(
+        conversation_id=conversation_id,
+        merchant_id="m_action",
+        customer_id=None,
+        trigger_id="trg_action",
+        send_as="vera",
+        suppression_key="research:tax",
+        prompt_version=settings.prompt_version,
+    )
     response = client.post(
         "/v1/reply",
         json={
-            "conversation_id": "conv_tax",
-            "merchant_id": "m_tax",
+            "conversation_id": conversation_id,
+            "merchant_id": "m_action",
             "customer_id": None,
             "from_role": "merchant",
             "message": "Can you help with GST filing?",
@@ -291,7 +303,113 @@ def test_reply_off_topic_redirects() -> None:
     assert response.status_code == 200
     assert response.json()["action"] == "send"
     assert response.json()["cta"] == "open_ended"
-    assert "leave that topic" in response.json()["body"]
+    assert response.json()["body"]  # LLM generates the redirect body — just verify it's non-empty
+
+
+def test_reply_busy_message_returns_wait() -> None:
+    _seed_action_mode_contexts()
+    conversation_id = "conv_busy"
+    store.create_conversation(
+        conversation_id=conversation_id,
+        merchant_id="m_action",
+        customer_id=None,
+        trigger_id="trg_action",
+        send_as="vera",
+        suppression_key="research:busy",
+        prompt_version=settings.prompt_version,
+    )
+    response = client.post(
+        "/v1/reply",
+        json={
+            "conversation_id": conversation_id,
+            "merchant_id": "m_action",
+            "customer_id": None,
+            "from_role": "merchant",
+            "message": "I am busy right now, ping me later.",
+            "received_at": utc_now_iso(),
+            "turn_number": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["action"] == "wait"
+    assert response.json()["wait_seconds"] == settings.default_busy_wait_seconds
+    assert response.json()["rationale"] == "busy_wait"
+
+
+def test_reply_accountant_question_does_not_use_generic_question_fallback() -> None:
+    _seed_action_mode_contexts()
+    conversation_id = "conv_accountant"
+    store.create_conversation(
+        conversation_id=conversation_id,
+        merchant_id="m_action",
+        customer_id=None,
+        trigger_id="trg_action",
+        send_as="vera",
+        suppression_key="research:accountant",
+        prompt_version=settings.prompt_version,
+    )
+
+    response = client.post(
+        "/v1/reply",
+        json={
+            "conversation_id": conversation_id,
+            "merchant_id": "m_action",
+            "customer_id": None,
+            "from_role": "merchant",
+            "message": "Can you recommend a good accountant?",
+            "received_at": utc_now_iso(),
+            "turn_number": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["action"] == "send"
+    assert response.json()["rationale"] != "question_fallback"
+    assert "Good question" not in (response.json()["body"] or "")
+
+
+def test_reply_repairs_generic_placeholder_after_commit(monkeypatch) -> None:
+    _seed_action_mode_contexts()
+    conversation_id = "conv_commit_repair"
+    store.create_conversation(
+        conversation_id=conversation_id,
+        merchant_id="m_action",
+        customer_id=None,
+        trigger_id="trg_action",
+        send_as="vera",
+        suppression_key="research:commit_repair",
+        prompt_version=settings.prompt_version,
+    )
+
+    def fake_classify_and_reply(*args, **kwargs):
+        return {
+            "action": "send",
+            "body": "Let me look into that — give me a moment.",
+            "rationale": "clarification_request",
+            "wait_seconds": None,
+        }
+
+    monkeypatch.setattr("app.main.wording_service.classify_and_reply", fake_classify_and_reply)
+
+    response = client.post(
+        "/v1/reply",
+        json={
+            "conversation_id": conversation_id,
+            "merchant_id": "m_action",
+            "customer_id": None,
+            "from_role": "merchant",
+            "message": "Ok lets do it. Whats next?",
+            "received_at": utc_now_iso(),
+            "turn_number": 2,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["action"] == "send"
+    body_lower = (response.json()["body"] or "").lower()
+    assert "let me look into that" not in body_lower
+    assert any(word in body_lower for word in ["draft", "next", "proceed", "confirm", "sending", "here"])
 
 
 def test_compose_gbp_unverified_humanizes_account_message() -> None:

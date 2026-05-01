@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import os
 
 from fastapi.testclient import TestClient
 
+from app.config import get_settings
 from app.main import app, store
 from app.store import utc_now_iso
 
@@ -15,6 +17,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def setup_function() -> None:
     store.clear()
+
+
+def test_placeholder_api_key_disables_llm(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-your-openai-key-here")
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.llm_enabled is False
+    finally:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        get_settings.cache_clear()
 
 
 def test_healthz_empty() -> None:

@@ -96,6 +96,13 @@ class LLMDraft(BaseModel):
     rationale: str
 
 
+class LLMReplyDecision(BaseModel):
+    action: ReplyAction
+    body: str | None = None
+    rationale: str
+    wait_seconds: int | None = None
+
+
 @dataclass(frozen=True)
 class EvidenceFact:
     label: str

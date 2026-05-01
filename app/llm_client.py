@@ -7,43 +7,61 @@ from langchain_openai import ChatOpenAI
 
 from app.config import Settings
 from app.evidence import humanize_scalar
-from app.schemas import ComposedMessage, LLMDraft, MessagePlan, ResolvedContext
+from app.schemas import ComposedMessage, LLMDraft, LLMReplyDecision, MessagePlan, ResolvedContext
 from app.voices import customer_salutation, language_hint, merchant_salutation
 
 
-SYSTEM_PROMPT = """You are Vera, a friendly merchant success manager at magicpin.
-You are writing one WhatsApp message for a merchant, or for a customer on the merchant's behalf.
+SYSTEM_PROMPT = """You are Vera, magicpin's merchant success manager, writing one WhatsApp message — to a merchant or to a customer on the merchant's behalf.
 
-Your message should feel human, sharp, and easy to reply to.
+--- OUTPUT CONTRACT ---
+Return valid JSON with exactly two keys: body (the WhatsApp message text), rationale (one short sentence explaining the core strategic choice you made).
+- body: WhatsApp-native, typically 2–4 sentences. Concise but complete.
+- rationale: factual, not promotional. "Used JIDA 3-mo recall stat to anchor urgency for high-risk adult segment" is good. "Created a compelling message" is not.
 
-Your output is judged on:
-- specificity: use verifiable facts from the approved evidence, not vague claims
-- category fit: match the category voice and allowed vocabulary
-- merchant fit: sound grounded in this merchant's actual business, offers, locality, or performance when supported by facts
-- trigger relevance: make it obvious why this message is being sent now
-- engagement compulsion: use one low-friction CTA that makes a reply easy
+--- WHAT THE JUDGE SCORES ---
+1. SPECIFICITY — anchor on one concrete, verifiable fact: a number, a date, a source citation, a peer benchmark, a named segment. "Haircut @ ₹99" beats "10% off". "2,100-patient JIDA trial" beats "studies show". Never say grow your business, boost sales, improve visibility, or increase revenue without a specific number attached.
+2. CATEGORY FIT — voice, vocabulary, and offer format must match the vertical:
+   • dentists/doctors: clinical-peer tone, technical terms OK ("fluoride recall", "caries"), NEVER retail-promo, NEVER "AMAZING DEAL"
+   • salons/spas: warm-aspirational, service+price preferred ("Haircut @ ₹99")
+   • restaurants: appetite-driven, location-specific, occasion-aware
+   • gyms/fitness: motivation + results, slot urgency OK
+   • pharmacies: compliance-first, empathetic, never prescribes
+3. MERCHANT FIT — personalized to THIS merchant: use their CTR, their patient counts, their offers, their locality, their conversation history. Match the language preference exactly (hi-en mix → Hinglish, English → English, Hindi → Hindi).
+4. TRIGGER RELEVANCE — the first sentence must make it obvious WHY this message is being sent RIGHT NOW. Use the trigger kind to frame:
+   • research_digest → "New [journal] item landed / relevant to your [segment]"
+   • perf_spike → "Your [metric] jumped [X]% this week"
+   • perf_dip → "[Metric] dropped [X]% — here's the likely fix"
+   • recall_due → "[Customer name]'s [interval] recall window just opened"
+   • dormant_with_vera → re-engage without re-introducing yourself (they know who you are)
+   • festival_upcoming → tie to the merchant's specific category + offer
+   • milestone_reached → congratulate + immediate next step
+   • competitor_opened → local loss-aversion framing
+   • review_theme_emerged → specific theme + quote from context
+   • scheduled_recurring → curiosity or knowledge-driven; never reminder-only
+5. ENGAGEMENT COMPULSION — use exactly ONE of these levers (pick the strongest given the context):
+   • Loss aversion: "you're missing X" / "before this window closes" / "competitor just opened nearby"
+   • Social proof: "3 dentists in your locality did Y this month" (only if peer data supports it)
+   • Effort externalization: "I've drafted it — just say go" / "5-minute setup"
+   • Curiosity: "want to see who?" / "want the full list?" / "here's the one thing that stands out"
+   • Specificity hook: the concrete fact IS the hook (lead with the number)
+   • Single binary commitment: end with "Reply YES to proceed" or "Want me to send it?" — not multi-choice
 
-Voice rules:
-- Keep it short and WhatsApp-native. Usually 2-3 sentences is enough.
-- Sound warm, capable, and natural. Never sound robotic, template-like, or spammy.
-- Prefer natural Hinglish in Roman script when the language hints say hi-en mix or the code-mix hint points that way.
-- End with one easy next step, helpful question, or simple CTA. Do not sound pushy.
-- Avoid stiff phrases like from our side, kindly note, please be informed, reminder again, or hope you are doing well.
+--- VOICE RULES ---
+- WhatsApp-native: warm, direct, no corporate stiffness
+- 2–4 sentences typical; one CTA at the end
+- Natural Hinglish (Roman script) when language hints say hi-en mix or code-mix is Hindi-English
+- Avoid: "Hope this finds you well", "From our side", "Kindly note", "Please be informed", "We are pleased to"
+- Avoid re-introducing Vera by name unless this is the very first message in the thread (dormant re-engagement allowed)
+- Merchant-facing: peer/colleague tone — you're helping them run their business, not selling to them
+- Customer-facing: warm and helpful on behalf of the merchant — simpler, no jargon
 
-Non-negotiable rules:
-- Use only the supplied facts. Never invent numbers, dates, prices, slots, names, competitors, or citations.
-- Start from the single strongest approved fact or trigger signal. Make the first sentence explain why this message is happening now whenever possible.
-- Use one core hook and no more than two supporting details. Do not overstuff lists unless the CTA genuinely needs multiple options or slots.
-- Never use generic fluff like grow your business, boost sales, improve visibility, or game-changing unless a fact makes the claim concrete.
-- Match the requested tone profile exactly.
-- Use one primary CTA.
-- Match any supplied locality, language hint, code-mix guidance, allowed vocabulary, and exact offer wording naturally.
-- If the trigger is sparse, stay conservative, but still anchor on the clearest available fact and one concrete next step.
-- For merchant-facing messages, sound like a sharp category-aware assistant speaking to the merchant, not an ad.
-- For customer-facing messages, sound like helpful merchant staff speaking on behalf of the business, warmer and simpler than merchant-facing copy.
-- When an approved fact includes a concrete service-and-price offer, prefer that exact phrasing over generic discount language.
-- If a citation or source is provided and it materially helps credibility, you may mention it briefly.
-- Return valid JSON with keys: body, rationale.
+--- NON-NEGOTIABLE RULES ---
+- Use only the supplied approved facts. Never invent numbers, dates, prices, citations, competitor names, or patient names.
+- When an approved fact includes service-and-price (e.g., "Dental Cleaning @ ₹299"), use that exact phrasing — do NOT convert to a percentage discount.
+- Start with the strongest why-now signal from the trigger or evidence. Make the first sentence earn its place.
+- One primary CTA only. Binary YES/STOP for action triggers. Open-ended or no CTA for pure information triggers.
+- If the trigger payload or evidence is sparse, stay conservative: anchor on the clearest available single fact and one concrete next step. Do not pad with filler.
+- Never qualify the merchant's own decision after they have already expressed intent. If they said yes, move to action mode.
 """
 
 
@@ -77,11 +95,87 @@ Latest message from {from_role}: "{message}"
 Reply as Vera. Be specific to these facts. Be brief."""
 
 
+REPLY_DECISION_SYSTEM_PROMPT = """You are Vera, magicpin's merchant success assistant, mid-conversation on WhatsApp.
+
+Your job: decide how to handle the latest inbound message and produce the exact reply in one step.
+
+--- VERA'S SCOPE ---
+IN SCOPE — you CAN and SHOULD answer these:
+- Patient or customer targeting: who to reach first, which segment to prioritise, lapsed/high-risk patient prioritisation
+- Recall intervals, treatment follow-ups, reactivation strategies
+- Profile performance metrics: views, CTR, calls, directions, peer comparisons — use the numbers from Key facts
+- Active offers, pricing, how to promote them on magicpin
+- Post ideas, Google Business Profile improvements, review management
+- Research digests or compliance updates provided in the context
+- Appointment slots and customer outreach messaging
+- Any question about running or growing the merchant's clinic/business on magicpin
+
+OUT OF SCOPE — you CANNOT help with these:
+- Accounting, GST, tax filing, income tax returns, bookkeeping
+- Legal advice, contracts, or finding a lawyer
+- Payroll software, HR tools, or hiring non-medical staff
+- Anything completely unrelated to the merchant's business on magicpin
+--- END SCOPE ---
+
+Decision rules:
+- action=send: use for all in-scope questions, out-of-scope redirects, identity questions, commits, and clarification asks.
+- action=wait: use ONLY when the person explicitly says they are busy right now or asks you to come back later (e.g. "I'm busy", "ping me later", "message me tomorrow", "not now"). This means NO reply is sent — the system will schedule a follow-up automatically. Do NOT use action=send with a body saying "I'll message you later" — use action=wait instead.
+- action=end: use ONLY if the message clearly ends the conversation or asks you to stop entirely.
+
+Response rules:
+- Mirror the language of the latest message exactly. English in, English out. Hinglish in, Hinglish out.
+- Keep the reply warm, direct, and WhatsApp-native. Usually 1-3 sentences.
+- Sound like a sharp category-aware operator, not a generic customer-support bot.
+- For IN SCOPE questions: answer directly and specifically using the Key facts provided. Do not hedge or ask for clarification if the facts are sufficient.
+- For OUT OF SCOPE questions: briefly acknowledge it falls outside what you handle, then redirect to one relevant thing you CAN help with from the current thread.
+- If the person wants to move forward on something: give one concrete, specific next step.
+- If the latest message is a COMMITMENT such as "ok lets do it", "go ahead", "what's next", "haan theek hai", or "next kya hoga", you MUST switch to ACTION MODE immediately. Do not re-qualify. Do not ask exploratory questions. Give a next step using action words like draft, next, proceed, here, confirm, or sending.
+- Use the most recent bot turn and conversation trigger to stay on-topic. If the thread started from a research or performance nudge, the next step should stay tied to that thread instead of drifting generic.
+- If the message is genuinely unclear: ask one focused clarification question.
+- Never invent facts, offers, numbers, names, dates, or capabilities not present in the provided context.
+
+Challenge-specific examples:
+1. Merchant: "Ok lets do it. Whats next?"
+    Good: action=send, rationale=commit_action, body like "Great. I'll draft the next step now and keep it specific to your high-risk adult recall plan."
+    Bad: asking another qualification question or saying a vague line like "give me a moment".
+2. Merchant: "Which patients specifically should I target first?"
+    Good: action=send, rationale=in_scope_answer, body uses the provided patient segments such as high-risk adults or lapsed patients.
+3. Merchant: "Can you recommend a good accountant?"
+    Good: action=send, rationale=out_of_scope_redirect, body briefly redirects to profile visibility, offers, outreach, or the current thread.
+4. Merchant: "I am busy right now, ping me later."
+    Good: action=wait, rationale=busy_wait, wait_seconds set.
+
+Return valid JSON with keys: action, body, rationale, wait_seconds.
+- body is required for action=send.
+- body is optional for action=end.
+- wait_seconds should only be set for action=wait.
+- rationale must be one of: in_scope_answer, out_of_scope_redirect, commit_action, busy_wait, identity_question, clarification_request.
+"""
+
+REPLY_DECISION_HUMAN_TEMPLATE = """Merchant: {merchant_name} | Category: {category} | Location: {locality}
+Languages: {languages}
+Message language: {message_language}
+Active signals: {signals}
+Trigger kind: {trigger_kind}
+Trigger summary: {trigger_summary}
+Latest bot turn: {latest_bot_turn}
+Key facts:
+{key_facts}
+
+Conversation so far:
+{history}
+
+Latest message from {from_role}: "{message}"
+
+Decide the action and write Vera's reply."""
+
+
 class WordingService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._structured_chain = None
         self._reply_chain = None
+        self._reply_decision_chain = None
         if settings.llm_enabled:
             llm = ChatOpenAI(
                 api_key=settings.openai_api_key,
@@ -94,39 +188,39 @@ class WordingService:
                 ("human", REPLY_HUMAN_TEMPLATE),
             ])
             self._reply_chain = reply_prompt | llm.with_structured_output(LLMDraft)
+            reply_decision_prompt = ChatPromptTemplate.from_messages([
+                ("system", REPLY_DECISION_SYSTEM_PROMPT),
+                ("human", REPLY_DECISION_HUMAN_TEMPLATE),
+            ])
+            self._reply_decision_chain = reply_decision_prompt | llm.with_structured_output(LLMReplyDecision)
             prompt = ChatPromptTemplate.from_messages(
                 [
                     ("system", SYSTEM_PROMPT),
                     (
                         "human",
-                        """
-Prompt version: {prompt_version}
-Category slug: {category_slug}
-Trigger family: {trigger_family}
-Trigger kind: {trigger_kind}
-Audience: {audience}
-Primary goal: {primary_goal}
-CTA type: {cta_type}
-Send as: {send_as}
-Merchant name: {merchant_name}
-Merchant locality: {merchant_locality}
-Primary language hint: {primary_language_hint}
-Language hints: {language_hints}
-Code mix hint: {code_mix}
+                        """Prompt version: {prompt_version}
+Category: {category_slug} | Trigger kind: {trigger_kind} | Trigger family: {trigger_family}
+Audience: {audience} | Primary goal: {primary_goal} | CTA type: {cta_type} | Send as: {send_as}
+Merchant: {merchant_name} | Locality: {merchant_locality}
+Language: primary={primary_language_hint}, hints={language_hints}, code-mix={code_mix}
 Allowed vocabulary: {allowed_vocabulary}
-Merchant active offers: {merchant_active_offers}
+Active offers: {merchant_active_offers}
 Category voice examples: {voice_examples}
 Tone profile: {tone_profile}
 Risk flags: {risk_flags}
-Approved facts:\n{approved_facts}
+Seasonal/trend signals: {seasonal_signals}
+Peer benchmarks: {peer_benchmarks}
 
-Writing style reminders:
-- Prefer Hinglish when the language hint says hi-en mix or the code-mix hint suggests Hindi-English.
-- Keep the body natural and concise. Usually 2-3 sentences.
-- Make the CTA feel easy and helpful, not salesy.
-- Do not repeat facts mechanically or sound like a template.
+Approved facts (use these verbatim — do not invent):
+{approved_facts}
 
-Choose one strongest hook from the approved facts, lead with why-now when possible, and write one WhatsApp message body plus one short rationale.
+Task:
+1. Pick the single strongest why-now hook from the approved facts + trigger kind.
+2. Choose ONE compulsion lever from: loss_aversion | social_proof | effort_externalization | curiosity | specificity_hook | single_binary_commitment.
+3. Write the WhatsApp body. Lead with why-now. End with the CTA.
+4. Write a rationale naming the hook + lever you used (e.g. "JIDA 3-mo recall stat + loss_aversion for high-risk adult segment").
+
+Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish (Roman script). If English, write in English.
 """,
                     ),
                 ]
@@ -168,6 +262,27 @@ Choose one strongest hook from the approved facts, lead with why-now when possib
                 part for part in [merchant_identity.get("locality"), merchant_identity.get("city")] if part
             )
             approved_facts = "\n".join(f"- {fact.label}: {fact.text} ({fact.source})" for fact in plan.evidence_facts)
+            # Seasonal beats and trend signals for why-now framing
+            seasonal_beats = resolved.category.get("seasonal_beats", [])
+            trend_signals = resolved.category.get("trend_signals", [])
+            seasonal_parts: list[str] = []
+            for beat in seasonal_beats[:2]:
+                seasonal_parts.append(f"{beat.get('month','')}: {beat.get('note','')}")
+            for sig in trend_signals[:2]:
+                seasonal_parts.append(f"trend: {sig.get('signal', str(sig))[:100]}")
+            seasonal_signals = "; ".join(seasonal_parts) if seasonal_parts else "none"
+            # Peer benchmarks for social proof and loss aversion
+            peer_stats = resolved.category.get("peer_stats", {}) or {}
+            peer_parts: list[str] = []
+            if peer_stats.get("avg_ctr"):
+                peer_parts.append(f"peer avg CTR: {peer_stats['avg_ctr']}")
+            if peer_stats.get("avg_views_30d"):
+                peer_parts.append(f"peer avg views (30d): {peer_stats['avg_views_30d']}")
+            if peer_stats.get("avg_rating"):
+                peer_parts.append(f"peer avg rating: {peer_stats['avg_rating']}")
+            if peer_stats.get("avg_reviews"):
+                peer_parts.append(f"peer avg reviews: {peer_stats['avg_reviews']}")
+            peer_benchmarks = "; ".join(peer_parts) if peer_parts else "none"
             result = self._structured_chain.invoke(
                 {
                     "prompt_version": self.settings.prompt_version,
@@ -188,6 +303,8 @@ Choose one strongest hook from the approved facts, lead with why-now when possib
                     "voice_examples": json.dumps(voice_examples, ensure_ascii=False),
                     "tone_profile": json.dumps(plan.tone_profile, ensure_ascii=False),
                     "risk_flags": json.dumps(plan.risk_flags, ensure_ascii=False),
+                    "seasonal_signals": seasonal_signals,
+                    "peer_benchmarks": peer_benchmarks,
                     "approved_facts": approved_facts,
                 }
             )
@@ -269,6 +386,137 @@ Choose one strongest hook from the approved facts, lead with why-now when possib
         except Exception:
             return self._chat_fallback(message, from_role, resolved)
 
+    def classify_and_reply(
+        self,
+        message: str,
+        from_role: str,
+        turns: list,
+        resolved: ResolvedContext | None,
+    ) -> dict:
+        if self._reply_decision_chain is None:
+            return self._reply_decision_fallback(message, from_role, resolved)
+        try:
+            context = self._reply_context(message, turns, resolved)
+            result = self._reply_decision_chain.invoke({
+                "merchant_name": context["merchant_name"],
+                "category": context["category_slug"],
+                "locality": context["locality"],
+                "languages": context["languages"],
+                "message_language": context["message_language"],
+                "signals": context["signals"],
+                "trigger_kind": context["trigger_kind"],
+                "trigger_summary": context["trigger_summary"].replace("{", "{{").replace("}", "}}"),
+                "latest_bot_turn": context["latest_bot_turn"].replace("{", "{{").replace("}", "}}"),
+                "key_facts": context["key_facts"].replace("{", "{{").replace("}", "}}"),
+                "history": context["history"].replace("{", "{{").replace("}", "}}"),
+                "from_role": from_role,
+                "message": message.replace("{", "{{").replace("}", "}}"),
+            })
+            if result.action == "send" and not (result.body or "").strip():
+                return self._reply_decision_fallback(message, from_role, resolved)
+            return {
+                "action": result.action,
+                "body": result.body.strip() if result.body else None,
+                "rationale": result.rationale.strip() or "reply_decision",
+                "wait_seconds": result.wait_seconds,
+            }
+        except Exception:
+            return self._reply_decision_fallback(message, from_role, resolved)
+
+    def _reply_context(self, message: str, turns: list, resolved: ResolvedContext | None) -> dict:
+        merchant = (resolved.merchant if resolved else {}) or {}
+        identity = merchant.get("identity", {})
+        merchant_name = identity.get("name", "the merchant")
+        category_slug = resolved.category.get("slug", "") if resolved else ""
+        locality = ", ".join(p for p in [identity.get("locality"), identity.get("city")] if p)
+        languages = ", ".join(identity.get("languages", []))
+        signals = ", ".join(merchant.get("signals", [])[:6])
+        trigger_kind = (resolved.trigger if resolved else {}).get("kind", "no_trigger")
+
+        facts_parts: list[str] = []
+
+        # Performance metrics
+        perf = merchant.get("performance", {})
+        if perf.get("views"):
+            peer_avg = (resolved.category.get("peer_stats", {}) or {}).get("avg_views_30d", "?") if resolved else "?"
+            facts_parts.append(f"- Views (30d): {perf['views']} (peer avg: {peer_avg})")
+        if perf.get("calls"):
+            facts_parts.append(f"- Calls (30d): {perf['calls']}")
+        if perf.get("ctr"):
+            peer_ctr = (resolved.category.get("peer_stats", {}) or {}).get("avg_ctr", "?") if resolved else "?"
+            facts_parts.append(f"- CTR: {perf['ctr']} (peer avg: {peer_ctr})")
+        if perf.get("directions"):
+            facts_parts.append(f"- Directions (30d): {perf['directions']}")
+        if perf.get("leads"):
+            facts_parts.append(f"- Leads (30d): {perf['leads']}")
+
+        # Customer segments — key for targeting questions
+        cust_agg = merchant.get("customer_aggregate", {})
+        if cust_agg.get("total_unique_ytd"):
+            facts_parts.append(f"- Total unique customers (YTD): {cust_agg['total_unique_ytd']}")
+        if cust_agg.get("retention_6mo_pct") is not None:
+            facts_parts.append(f"- 6-month retention: {round(cust_agg['retention_6mo_pct'] * 100)}%")
+        if cust_agg.get("high_risk_adult_count"):
+            facts_parts.append(f"- High-risk adult patients (prime recall candidates): {cust_agg['high_risk_adult_count']}")
+        if cust_agg.get("lapsed_180d_plus"):
+            facts_parts.append(f"- Lapsed patients (180d+, reactivation targets): {cust_agg['lapsed_180d_plus']}")
+
+        # Active merchant offers
+        active_offers = [o.get("title", "") for o in merchant.get("offers", []) if o.get("status") == "active" and o.get("title")]
+        if active_offers:
+            facts_parts.append(f"- Active offers: {'; '.join(active_offers[:3])}")
+
+        # Category offer catalog
+        if resolved:
+            cat_offers = resolved.category.get("offer_catalog", [])
+            if cat_offers:
+                cat_offer_titles = [f"{o.get('title','')} (audience: {o.get('audience','')})" for o in cat_offers[:3]]
+                facts_parts.append(f"- Category offers available: {'; '.join(cat_offer_titles)}")
+
+        # Review themes
+        for rt in merchant.get("review_themes", [])[:3]:
+            quote = rt.get("common_quote", "")
+            facts_parts.append(f"- Reviews ({rt.get('sentiment','')}): {rt.get('theme','')} — \"{quote}\" ({rt.get('occurrences_30d', 0)} mentions in 30d)")
+
+        # Category research/compliance digest
+        if resolved:
+            for item in resolved.category.get("digest", [])[:2]:
+                actionable = item.get("actionable", "")
+                facts_parts.append(f"- Digest [{item.get('id','')}]: {item.get('title','')}: {item.get('summary','')[:140]} — Action: {actionable} ({item.get('source','')})")
+
+        # Trigger context — what prompted this conversation
+        trigger_summary = "(no trigger context available)"
+        if resolved and resolved.trigger:
+            t = resolved.trigger
+            tpayload = t.get("payload", {}) or {}
+            facts_parts.append(f"- Conversation trigger: {t.get('kind','')} | {json.dumps(tpayload, ensure_ascii=False)[:200]}")
+            trigger_summary = f"{t.get('kind','')} | source={t.get('source', 'unknown')} | urgency={t.get('urgency', 'unknown')} | payload={json.dumps(tpayload, ensure_ascii=False)[:220]}"
+
+        key_facts = "\n".join(facts_parts) if facts_parts else "(no additional facts available)"
+
+        history_lines: list[str] = []
+        latest_bot_turn = "(no prior bot turn)"
+        for turn in (turns or [])[-6:]:
+            role = turn.from_role if hasattr(turn, "from_role") else turn.get("from_role", "?")
+            msg = turn.message if hasattr(turn, "message") else turn.get("message", "")
+            history_lines.append(f"{role}: {msg}")
+            if role == "bot":
+                latest_bot_turn = msg
+        history = "\n".join(history_lines) if history_lines else "(no prior turns)"
+        return {
+            "merchant_name": merchant_name,
+            "category_slug": category_slug,
+            "locality": locality,
+            "languages": languages,
+            "signals": signals,
+            "trigger_kind": trigger_kind,
+            "trigger_summary": trigger_summary,
+            "latest_bot_turn": latest_bot_turn,
+            "key_facts": key_facts,
+            "history": history,
+            "message_language": self._detect_message_language(message),
+        }
+
     def _detect_message_language(self, message: str) -> str:
         """Return 'english', 'hi-en mix', or 'hindi' based on the message content."""
         # Devanagari Unicode block 0900–097F means native Hindi script
@@ -293,40 +541,129 @@ Choose one strongest hook from the approved facts, lead with why-now when possib
         from_role: str,
         resolved: ResolvedContext | None,
     ) -> tuple[str, str]:
-        merchant_name = resolved.merchant.get("identity", {}).get("name", "") if resolved else ""
+        """Absolute last-resort fallback — only reached when the LLM chain is unavailable or errors."""
+        text = message.strip().lower()
         lang = self._detect_message_language(message)
-        is_english = (lang == 'english')
-        name_hi = f"{merchant_name} ke liye" if merchant_name else "aapke liye"
-        name_en = f"for {merchant_name}" if merchant_name else "for you"
-        text = message.lower()
-        identity_words = ["who are you", "what are you", "kaun ho", "naam kya", "kya naam", "apna naam", "your name", "aap kaun"]
-        if any(w in text for w in identity_words):
+        is_english = lang == "english"
+        merchant_name = ((resolved.merchant if resolved else {}) or {}).get("identity", {}).get("name", "")
+
+        if self._looks_like_identity_question(text):
             if is_english:
-                body = f"I'm Vera — magicpin's merchant success assistant. I help {name_en} with profile visibility, customer outreach, and growth insights."
+                body = "I'm Vera, magicpin's merchant success assistant. I help with profile visibility, customer outreach, and practical growth next steps."
             else:
-                body = f"Main Vera hoon — magicpin ki merchant success assistant. {name_hi} profile visibility, customer outreach, aur growth insights mein help karti hoon."
+                body = "Main Vera hoon, magicpin ki merchant success assistant. Main profile visibility, customer outreach, aur practical growth next steps mein help karti hoon."
             return body, "identity_question"
-        # Check commit intent BEFORE question detection — "Yes! Whats next?" is a commit,
-        # not a question. The ? would otherwise send it down the wrong branch.
-        commit_words = ["yes", "go ahead", "lets do it", "let's do it", "send it",
-                        "proceed", "share it", "whats next", "what's next"]
-        if any(w in text for w in commit_words):
+
+        if self._looks_like_commit(text):
             if is_english:
-                body = f"Got it, let's move ahead! Drafting the next concrete step {name_en} now."
+                next_step = f" for {merchant_name}" if merchant_name else ""
+                body = f"Great. I'll draft the next concrete step{next_step} now so we can proceed without reworking the basics."
             else:
-                body = f"Got it, aage badhte hain! {name_hi} next concrete step draft karti hoon — ek second."
+                next_step = f" {merchant_name} ke liye" if merchant_name else ""
+                body = f"Theek hai. Main abhi next concrete step{next_step} draft karti hoon taaki hum seedha proceed kar sakein."
             return body, "commit_action"
-        if "?" in text or any(text.startswith(w) for w in ("why", "who", "what", "how", "when", "can", "kya", "kaun", "kaise", "kyun")):
+
+        if self._looks_like_busy(text):
+            return "", "busy_wait"
+
+        if self._looks_like_out_of_scope(text):
             if is_english:
-                body = f"Good question — let me answer based on what I have {name_en}. More detail from your side would help me be more precise."
+                body = "That part is outside what I handle here, but I can help with profile visibility, patient outreach, offers, or the next business step on this thread."
             else:
-                body = f"Achha sawaal — {name_hi} jo context available hai ussi ke basis pe jawab deti hoon. Thoda aur detail milega toh aur precise ho sakti hoon."
-            return body, "question_fallback"
+                body = "Woh part main yahan handle nahi karti, lekin profile visibility, patient outreach, offers, ya iss thread ke next business step mein help kar sakti hoon."
+            return body, "out_of_scope_redirect"
+
         if is_english:
-            body = "Got it — shall we move ahead? I can draft the next step right now."
+            body = "I can keep this practical. Tell me whether you want the next step, a recommendation, or a quick summary from what I already have."
         else:
-            body = "Got it — aage badhein? Main next step abhi draft kar sakti hoon."
-        return body, "ambiguous_fallback"
+            body = "Main isse practical rakh sakti hoon. Bata do aapko next step chahiye, recommendation chahiye, ya jo context hai uska quick summary chahiye."
+        return body, "clarification_request"
+
+    def _reply_decision_fallback(
+        self,
+        message: str,
+        from_role: str,
+        resolved: ResolvedContext | None,
+    ) -> dict:
+        """Absolute last-resort fallback — only reached when the LLM chain is completely unavailable."""
+        body, rationale = self._chat_fallback(message, from_role, resolved)
+        if rationale == "busy_wait":
+            return {
+                "action": "wait",
+                "body": None,
+                "rationale": rationale,
+                "wait_seconds": self.settings.default_busy_wait_seconds,
+            }
+        return {
+            "action": "send",
+            "body": body,
+            "rationale": rationale,
+            "wait_seconds": None,
+        }
+
+    def _looks_like_identity_question(self, text: str) -> bool:
+        identity_words = [
+            "who are you",
+            "what are you",
+            "your name",
+            "what do you do",
+            "kaun ho",
+            "aap kaun",
+            "naam kya",
+            "kya naam",
+            "apna naam",
+        ]
+        return any(word in text for word in identity_words)
+
+    def _looks_like_commit(self, text: str) -> bool:
+        commit_words = [
+            "yes",
+            "go ahead",
+            "let's do it",
+            "lets do it",
+            "do it",
+            "proceed",
+            "send it",
+            "share it",
+            "what's next",
+            "whats next",
+            "next kya",
+            "haan",
+            "theek hai",
+            "kar do",
+            "chalo karte hain",
+        ]
+        return any(word in text for word in commit_words)
+
+    def _looks_like_busy(self, text: str) -> bool:
+        busy_words = [
+            "busy",
+            "ping me later",
+            "message me later",
+            "call me later",
+            "follow up later",
+            "follow-up later",
+            "not now",
+            "baad mein",
+            "abhi nahi",
+            "message me tomorrow",
+            "talk later",
+        ]
+        return any(word in text for word in busy_words)
+
+    def _looks_like_out_of_scope(self, text: str) -> bool:
+        off_topic_words = [
+            "gst",
+            "tax",
+            "accountant",
+            "bookkeeping",
+            "payroll",
+            "income tax",
+            "legal",
+            "lawyer",
+            "contract",
+        ]
+        return any(word in text for word in off_topic_words)
 
     def _clean_text(self, value: str) -> str:
         return value.replace("_", " ").strip()

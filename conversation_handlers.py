@@ -27,7 +27,14 @@ def respond(state: ConversationState, merchant_message: str) -> dict:
             "wait_seconds": get_settings().default_auto_reply_wait_seconds,
             "rationale": "An auto-reply was detected, so the bot is waiting before trying again.",
         }
-    if classification.kind == "explicit_yes_or_commit":
+    if classification.kind == "busy_wait":
+        return {
+            "action": "wait",
+            "wait_seconds": get_settings().default_busy_wait_seconds,
+            "rationale": "The merchant is busy, so the handler waits instead of pushing another turn.",
+        }
+    text = merchant_message.lower()
+    if any(token in text for token in ["yes", "go ahead", "let's do it", "lets do it", "what's next", "whats next", "next kya", "haan"]):
         return {
             "action": "send",
             "body": "Great. I am switching into action mode and will keep the next step concrete.",

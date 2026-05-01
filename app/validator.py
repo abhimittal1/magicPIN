@@ -7,6 +7,27 @@ from app.schemas import ComposedMessage, MessagePlan, ResolvedContext
 
 
 NUM_PATTERN = re.compile(r"\b\d[\dTtZz,.:/%+-]*\b")
+GENERIC_REPLY_PATTERNS = [
+    re.compile(r"let me look into that", re.IGNORECASE),
+    re.compile(r"give me a moment", re.IGNORECASE),
+    re.compile(r"could you share a little more context", re.IGNORECASE),
+]
+QUALIFYING_PATTERNS = [
+    re.compile(r"\bwould you\b", re.IGNORECASE),
+    re.compile(r"\bdo you\b", re.IGNORECASE),
+    re.compile(r"\bcan you tell\b", re.IGNORECASE),
+    re.compile(r"\bhow about\b", re.IGNORECASE),
+]
+COMMIT_PATTERNS = [
+    re.compile(r"\byes\b", re.IGNORECASE),
+    re.compile(r"go ahead", re.IGNORECASE),
+    re.compile(r"let'?s do it", re.IGNORECASE),
+    re.compile(r"whats next|what's next", re.IGNORECASE),
+    re.compile(r"next kya", re.IGNORECASE),
+    re.compile(r"\bhaan\b", re.IGNORECASE),
+    re.compile(r"theek hai", re.IGNORECASE),
+    re.compile(r"kar do", re.IGNORECASE),
+]
 
 
 def _extract_numeric_tokens(text: str) -> set[str]:
@@ -74,4 +95,24 @@ class MessageValidator:
                     issues.append("missing_estimated_uplift")
             if "not verified" not in body_lower and "verify nahi" not in body_lower:
                 issues.append("missing_verification_status")
+        return issues
+
+    def validate_reply(
+        self,
+        body: str,
+        incoming_message: str,
+        previous_bot_body: str | None = None,
+    ) -> list[str]:
+        issues: list[str] = []
+        stripped = body.strip()
+        if not stripped:
+            issues.append("empty_reply")
+            return issues
+        if any(pattern.search(stripped) for pattern in GENERIC_REPLY_PATTERNS):
+            issues.append("generic_reply")
+        if previous_bot_body and stripped == previous_bot_body.strip():
+            issues.append("repeated_reply")
+        if any(pattern.search(incoming_message) for pattern in COMMIT_PATTERNS):
+            if any(pattern.search(stripped) for pattern in QUALIFYING_PATTERNS):
+                issues.append("qualification_after_commit")
         return issues

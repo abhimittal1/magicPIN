@@ -7,6 +7,7 @@ from app.llm_client import WordingService
 from app.reply_classifier import ReplyClassification, ReplyClassifier
 from app.resolver import ContextResolver
 from app.store import ConversationRecord, RuntimeStore, parse_iso, utc_now_iso
+from app.validator import MessageValidator
 
 
 class ReplyManager:
@@ -16,6 +17,7 @@ class ReplyManager:
         self.classifier = classifier
         self.settings = settings
         self.wording_service = wording_service
+        self.validator = MessageValidator()
 
     def handle(
         self,
@@ -39,36 +41,54 @@ class ReplyManager:
 
         classification = self.classifier.classify(message)
         if classification.kind == "auto_reply":
-            return self._handle_auto_reply(record, received_at)
+            self.store.mark_ended(record.conversation_id)
+            self.store.suppress(record.suppression_key)
+            return {"action": "end", "rationale": "An auto-reply was detected, so the conversation is being closed immediately rather than wasting further turns."}
         if classification.kind in {"explicit_no_or_stop", "abusive"}:
             self.store.mark_ended(conversation_id)
             self.store.suppress(record.suppression_key)
             return {"action": "end", "rationale": "The contact explicitly opted out or turned hostile, so the conversation is ending gracefully."}
-        if classification.kind == "later_busy":
-            wait_until = self._future_iso(received_at, self.settings.default_busy_wait_seconds)
-            self.store.mark_wait(conversation_id, wait_until)
-            return {"action": "wait", "wait_seconds": self.settings.default_busy_wait_seconds, "rationale": "The contact asked for time, so the bot is backing off before retrying."}
-        if classification.kind == "off_topic":
-            body = "I will leave that topic to the right expert for now. On this thread, I can still keep the next step simple if you want."
-            self.store.add_turn(conversation_id, from_role="bot", message=body, ts=utc_now_iso(), action="send")
-            return {"action": "send", "body": body, "cta": "open_ended", "rationale": "The ask is out of scope, so the reply declines politely and redirects to the original thread."}
-        if classification.kind == "explicit_yes_or_commit":
-            body, rationale = self._action_mode_reply(record, message)
-            self.store.add_turn(conversation_id, from_role="bot", message=body, ts=utc_now_iso(), action="send")
-            return {"action": "send", "body": body, "cta": "open_ended", "rationale": rationale}
-        if classification.kind == "question":
-            body, rationale = self._question_reply(record, message)
-            self.store.add_turn(conversation_id, from_role="bot", message=body, ts=utc_now_iso(), action="send")
-            return {"action": "send", "body": body, "cta": "open_ended", "rationale": rationale}
+        if classification.kind == "busy_wait":
+            wait_seconds = self.settings.default_busy_wait_seconds
+            self.store.mark_wait(conversation_id, self._future_iso(received_at, wait_seconds))
+            return {"action": "wait", "wait_seconds": wait_seconds, "rationale": "busy_wait"}
 
-        body, rationale = self.wording_service.chat_reply(
+        decision = self.wording_service.classify_and_reply(
             message=message,
             from_role="customer" if customer_id else "merchant",
             turns=record.turns,
             resolved=self._resolve_for_reply(record),
         )
+        previous_bot_body = self._last_bot_turn(record)
+        if decision["action"] == "send":
+            issues = self.validator.validate_reply(
+                body=decision.get("body") or "",
+                incoming_message=message,
+                previous_bot_body=previous_bot_body,
+            )
+            if issues:
+                decision = self.wording_service._reply_decision_fallback(
+                    message=message,
+                    from_role="customer" if customer_id else "merchant",
+                    resolved=self._resolve_for_reply(record),
+                )
+                if decision["action"] == "send":
+                    decision["rationale"] = f"{decision['rationale']}; repaired_reply:{','.join(issues)}"
+        if decision["action"] == "wait":
+            wait_seconds = decision.get("wait_seconds") or self.settings.default_busy_wait_seconds
+            self.store.mark_wait(conversation_id, self._future_iso(received_at, wait_seconds))
+            return {"action": "wait", "wait_seconds": wait_seconds, "rationale": decision["rationale"]}
+        if decision["action"] == "end":
+            self.store.mark_ended(conversation_id)
+            self.store.suppress(record.suppression_key)
+            if decision.get("body"):
+                self.store.add_turn(conversation_id, from_role="bot", message=decision["body"], ts=utc_now_iso(), action="end")
+                return {"action": "end", "body": decision["body"], "cta": "open_ended", "rationale": decision["rationale"]}
+            return {"action": "end", "rationale": decision["rationale"]}
+
+        body = decision.get("body") or "Could you share a little more context?"
         self.store.add_turn(conversation_id, from_role="bot", message=body, ts=utc_now_iso(), action="send")
-        return {"action": "send", "body": body, "cta": "open_ended", "rationale": rationale}
+        return {"action": "send", "body": body, "cta": "open_ended", "rationale": decision["rationale"]}
 
     def _existing_trigger_id(self, conversation_id: str) -> str | None:
         record = self.store.get_conversation(conversation_id)
@@ -81,28 +101,13 @@ class ReplyManager:
             return self.resolver.resolve_merchant_id(record.merchant_id)
         return None
 
-    def _handle_auto_reply(self, record: ConversationRecord, received_at: str) -> dict:
-        self.store.mark_ended(record.conversation_id)
-        self.store.suppress(record.suppression_key)
-        return {"action": "end", "rationale": "An auto-reply was detected, so the conversation is being closed immediately rather than wasting further turns."}
-
-    def _action_mode_reply(self, record: ConversationRecord, message: str) -> tuple[str, str]:
-        return self.wording_service.chat_reply(
-            message=message,
-            from_role="customer" if record.customer_id else "merchant",
-            turns=record.turns,
-            resolved=self._resolve_for_reply(record),
-        )
-
-    def _question_reply(self, record: ConversationRecord, message: str) -> tuple[str, str]:
-        return self.wording_service.chat_reply(
-            message=message,
-            from_role="customer" if record.customer_id else "merchant",
-            turns=record.turns,
-            resolved=self._resolve_for_reply(record),
-        )
-
     def _future_iso(self, base: str, wait_seconds: int) -> str:
         start = parse_iso(base) or parse_iso(utc_now_iso())
         future = start + timedelta(seconds=wait_seconds)
         return future.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def _last_bot_turn(self, record: ConversationRecord) -> str | None:
+        for turn in reversed(record.turns):
+            if turn.from_role == "bot":
+                return turn.message
+        return None
