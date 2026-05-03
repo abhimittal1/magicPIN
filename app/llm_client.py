@@ -122,12 +122,29 @@ Decision rules:
 - action=wait: use ONLY when the person explicitly says they are busy right now or asks you to come back later (e.g. "I'm busy", "ping me later", "message me tomorrow", "not now"). This means NO reply is sent — the system will schedule a follow-up automatically. Do NOT use action=send with a body saying "I'll message you later" — use action=wait instead.
 - action=end: use ONLY if the message clearly ends the conversation or asks you to stop entirely.
 
+--- CUSTOMER vs MERCHANT MODE ---
+The from_role field in the message tells you who sent the latest message.
+
+If from_role == "customer":
+- You are replying AS THE MERCHANT (on behalf of the business), NOT as Vera.
+- Voice: warm, helpful staff from the business. Use the business name in the reply, not "Vera" or "magicpin".
+- Language: simple, no jargon (no CTR, views, calls, metrics). Focus on appointment, booking, service, offer.
+- Address the customer by name if available in context.
+- If customer says "Yes please book me for [day/time]": confirm the appointment with specific details (day, time, business name). Do NOT invent a confirmation system — just acknowledge warmly and confirm the details.
+- If customer asks about an offer/price: use the active offer from Key facts verbatim.
+- Never mention Vera, magicpin infrastructure, or merchant analytics to a customer.
+
+If from_role == "merchant":
+- You are replying as Vera, magicpin's merchant success assistant.
+- Use the full scope rules above.
+
 Response rules:
 - Mirror the language of the latest message exactly. English in, English out. Hinglish in, Hinglish out.
 - Keep the reply warm, direct, and WhatsApp-native. Usually 1-3 sentences.
-- Sound like a sharp category-aware operator, not a generic customer-support bot.
-- For IN SCOPE questions: answer directly and specifically using the Key facts provided. Do not hedge or ask for clarification if the facts are sufficient.
-- For OUT OF SCOPE questions: briefly acknowledge it falls outside what you handle, then redirect to one relevant thing you CAN help with from the current thread.
+- For merchant: sound like a sharp category-aware operator, not a generic customer-support bot.
+- For customer: sound like helpful, warm business staff.
+- For IN SCOPE merchant questions: answer directly and specifically using the Key facts provided. Do not hedge or ask for clarification if the facts are sufficient.
+- For OUT OF SCOPE merchant questions: briefly acknowledge it falls outside what you handle, then redirect to one relevant thing you CAN help with from the current thread.
 - If the person wants to move forward on something: give one concrete, specific next step.
 - If the latest message is a COMMITMENT such as "ok lets do it", "go ahead", "what's next", "haan theek hai", or "next kya hoga", you MUST switch to ACTION MODE immediately. Do not re-qualify. Do not ask exploratory questions. Give a next step using action words like draft, next, proceed, here, confirm, or sending.
 - Use the most recent bot turn and conversation trigger to stay on-topic. If the thread started from a research or performance nudge, the next step should stay tied to that thread instead of drifting generic.
@@ -144,6 +161,9 @@ Challenge-specific examples:
     Good: action=send, rationale=out_of_scope_redirect, body briefly redirects to profile visibility, offers, outreach, or the current thread.
 4. Merchant: "I am busy right now, ping me later."
     Good: action=wait, rationale=busy_wait, wait_seconds set.
+5. Customer: "Yes please book me for Wed 5 Nov, 6pm."
+    Good: action=send, rationale=in_scope_answer, body like "Hi Priya, you're booked for Wed Nov 5 at 6pm at Dr. Meera's Dental Clinic. See you then!" (use merchant name, customer name, specific time)
+    Bad: generic "Great! I've booked your appointment." or addressing them as a merchant.
 
 Return valid JSON with keys: action, body, rationale, wait_seconds.
 - body is required for action=send.
@@ -434,6 +454,22 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         trigger_kind = (resolved.trigger if resolved else {}).get("kind", "no_trigger")
 
         facts_parts: list[str] = []
+
+        # Customer context — when replying to a customer, include their name and state
+        if resolved:
+            customer = resolved.customer
+            if customer:
+                c_name = customer.get("identity", {}).get("name", "")
+                if c_name:
+                    facts_parts.append(f"- Customer name: {c_name}")
+                c_state = customer.get("state", "")
+                if c_state:
+                    facts_parts.append(f"- Customer state: {c_state}")
+                c_rel = customer.get("relationship", {})
+                if c_rel.get("last_visit"):
+                    facts_parts.append(f"- Customer last visit: {c_rel['last_visit']}")
+                if c_rel.get("services_received"):
+                    facts_parts.append(f"- Services received: {'; '.join(str(s) for s in c_rel['services_received'][:3])}")
 
         # Performance metrics
         perf = merchant.get("performance", {})
@@ -761,13 +797,23 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                 )
                 return body, plan.rationale_seed
             festival = self._payload_text(payload, "festival") or "the upcoming festival period"
-            date = self._payload_text(payload, "date")
+            date = self._payload_text(payload, "date") or ""
+            days_until = str(payload.get("days_until", "") or "").strip()
+            active_offer = self._fact_text(plan, "active_offers")
             date_clause = f" on {date}" if date else ""
-            body = self._pick_copy(
-                prefers_hinglish,
-                f"{lead}, {festival} is coming up{date_clause}. Want me to draft one timely offer or reminder?",
-                f"{lead}, {festival} aa raha hai{date_clause}. Chaho toh main ek timely offer ya reminder draft kar doon?",
-            )
+            urgency_clause = f" ({days_until} days away)" if days_until and days_until.isdigit() and int(days_until) <= 7 else ""
+            if active_offer:
+                body = self._pick_copy(
+                    prefers_hinglish,
+                    f"{lead}, {festival} is coming up{date_clause}{urgency_clause} — peak booking window for your category. Your {active_offer} is already live. Want me to draft a push to amplify it? Ready in 5 min.",
+                    f"{lead}, {festival} aa raha hai{date_clause}{urgency_clause} — aapki category ke liye peak booking window. Aapka {active_offer} already live hai. Push draft kar doon isko amplify karne ke liye? 5 min mein ready.",
+                )
+            else:
+                body = self._pick_copy(
+                    prefers_hinglish,
+                    f"{lead}, {festival} is coming up{date_clause}{urgency_clause}. This is the peak booking window for your category — competitors will be pushing offers this week. Want me to draft one for you first? Ready in 5 min.",
+                    f"{lead}, {festival} aa raha hai{date_clause}{urgency_clause}. Ye aapki category ke liye peak booking window hai — competitors is week offers push karenge. Chaho toh main pehle aapka draft kar doon? 5 min mein ready.",
+                )
             return body, plan.rationale_seed
 
         if trigger_kind == "category_seasonal":
@@ -788,13 +834,40 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
 
         if trigger_kind == "ipl_match_today":
             match = self._payload_text(payload, "match") or "today's match"
-            venue = self._payload_text(payload, "venue")
-            venue_clause = f" near {venue}" if venue else ""
-            body = self._pick_copy(
-                prefers_hinglish,
-                f"{lead}, {match} is on today{venue_clause}. Want me to draft a match-time offer or broadcast?",
-                f"{lead}, {match} aaj hai{venue_clause}. Chaho toh main match-time offer ya broadcast draft kar doon?",
-            )
+            venue = self._payload_text(payload, "venue") or ""
+            is_weeknight = bool(payload.get("is_weeknight", False))
+            active_offer = self._fact_text(plan, "active_offers")
+            if is_weeknight:
+                hook_en = "Weeknight IPL usually pushes delivery orders +18%"
+                hook_hi = "Weeknight IPL delivery orders usually +18% hote hain"
+                if active_offer:
+                    body = self._pick_copy(
+                        prefers_hinglish,
+                        f"{lead}, {match} tonight{' near ' + venue if venue else ''}. {hook_en} — your {active_offer} is perfectly placed. Want me to draft a quick broadcast to catch the delivery window? Ready in 10 min.",
+                        f"{lead}, aaj raat {match}{' near ' + venue if venue else ''}. {hook_hi} — aapka {active_offer} perfectly placed hai. Delivery window pakadne ke liye quick broadcast draft kar doon? 10 min mein ready.",
+                    )
+                else:
+                    body = self._pick_copy(
+                        prefers_hinglish,
+                        f"{lead}, {match} tonight{' near ' + venue if venue else ''}. {hook_en}. Want me to draft a quick delivery-focused offer to capture this? Ready in 10 min.",
+                        f"{lead}, aaj raat {match}{' near ' + venue if venue else ''}. {hook_hi}. Delivery-focused offer draft kar doon is window ke liye? 10 min mein ready.",
+                    )
+            else:
+                # Weekend/non-weeknight: counter-intuitive — people watch at home, covers drop
+                hook_en = "Saturday IPL usually drops dine-in covers -12% (people watch at home)"
+                hook_hi = "Saturday IPL mein usually dine-in covers -12% girte hain"
+                if active_offer:
+                    body = self._pick_copy(
+                        prefers_hinglish,
+                        f"{lead}, {match} at {venue} tonight. Counter-intuitive: {hook_en}. Skip the match-night promo; push your {active_offer} as a delivery-only special instead. Want me to draft the banner? Live in 10 min.",
+                        f"{lead}, aaj {venue} mein {match}. Counter-intuitive: {hook_hi}. Match-night promo skip karo; {active_offer} ko delivery-only special ke taur pe push karo. Banner draft kar doon? 10 min mein live.",
+                    )
+                else:
+                    body = self._pick_copy(
+                        prefers_hinglish,
+                        f"{lead}, {match} at {venue} tonight. Counter-intuitive: {hook_en}. Best play is a delivery-only special. Want me to draft the banner? Live in 10 min.",
+                        f"{lead}, aaj {venue} mein {match}. Counter-intuitive: {hook_hi}. Best play delivery-only special hai. Banner draft kar doon? 10 min mein live.",
+                    )
             return body, plan.rationale_seed
 
         summary = ", ".join(self._interesting_fact_texts(plan)[:2]) or "there is a timely update affecting your business"
@@ -828,10 +901,12 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             detail = f"{metric} {verb} down {delta}" if delta else f"{metric} {verb} softer than usual"
             if window:
                 detail = f"{detail} over the last {window}"
+            peer_ctr = self._fact_text(plan, "peer_avg_ctr")
+            peer_clause = f" — peer average is {peer_ctr}" if peer_ctr else ""
             body = self._pick_copy(
                 prefers_hinglish,
-                f"{lead}, quick read: {detail}. Want me to draft one focused fix for this week?",
-                f"{lead}, quick read: {detail}. Chaho toh main is week ke liye ek focused fix draft kar doon?",
+                f"{lead}, quick read: {detail}{peer_clause}. Most likely fix: one targeted post or offer update in the next 48h. Want me to draft it?",
+                f"{lead}, quick read: {detail}{peer_clause}. Most likely fix: ek targeted post ya offer next 48h mein. Draft kar doon?",
             )
             return body, plan.rationale_seed
 
@@ -850,10 +925,24 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             detail = f"{metric} {verb} up {delta}" if delta else f"{metric} {verb} stronger than usual"
             if window:
                 detail = f"{detail} over the last {window}"
+            peer_ctr = self._fact_text(plan, "peer_avg_ctr")
+            merchant_perf = resolved.merchant.get("performance", {})
+            ctr_clause = ""
+            if merchant_perf.get("ctr") and peer_ctr:
+                try:
+                    peer_val_str = peer_ctr.rstrip("%").strip()
+                    peer_val = float(peer_val_str) / 100 if float(peer_val_str) > 1 else float(peer_val_str)
+                    m_ctr = float(merchant_perf["ctr"])
+                    if m_ctr > peer_val:
+                        ctr_clause = f" (CTR above peer avg of {peer_ctr})"
+                    else:
+                        ctr_clause = f" (peer avg CTR is {peer_ctr} — still room to grow)"
+                except (ValueError, TypeError):
+                    pass
             body = self._pick_copy(
                 prefers_hinglish,
-                f"{lead}, quick read: {detail}. Want me to draft one way to keep the momentum going?",
-                f"{lead}, quick read: {detail}. Chaho toh main momentum ko hold karne ka ek step draft kar doon?",
+                f"{lead}, quick read: {detail}{ctr_clause}. One move to lock this in: update your GBP post now while the signal is hot. Want me to draft it? 5 min.",
+                f"{lead}, quick read: {detail}{ctr_clause}. Isko lock karne ka ek move: abhi GBP post update karo jab signal hot hai. Draft kar doon? 5 min.",
             )
             return body, plan.rationale_seed
 
@@ -871,16 +960,24 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             imminent = bool(payload.get("is_imminent"))
             if imminent and milestone_value:
                 detail = f"you are close to {milestone_value} {metric}"
+                next_step_en = f"Hit {milestone_value} this week and I can draft a 'thank you' GBP post + broadcast to your regulars. Worth 10 min?"
+                next_step_hi = f"Is week {milestone_value} hit karo aur main ek 'thank you' GBP post + regulars ko broadcast draft kar sakti hoon. 10 min worth hai?"
             elif milestone_value:
-                detail = f"you have reached {milestone_value} {metric}"
+                detail = f"you crossed {milestone_value} {metric}"
+                next_step_en = f"Best move now: a pinned GBP post celebrating this + one re-engagement offer to your regulars. Want me to draft both? 10 min."
+                next_step_hi = f"Best move abhi: ek pinned GBP post + regulars ke liye ek re-engagement offer. Dono draft kar doon? 10 min."
             elif value_now:
                 detail = f"{metric} is now at {value_now}"
+                next_step_en = "Want me to draft a short push to build on this momentum?"
+                next_step_hi = "Chaho toh is momentum ko build karne ke liye ek short push draft kar doon?"
             else:
                 detail = "a useful milestone is within reach"
+                next_step_en = "Want me to draft a short push to build on it?"
+                next_step_hi = "Chaho toh isko build karne ke liye ek short push draft kar doon?"
             body = self._pick_copy(
                 prefers_hinglish,
-                f"{lead}, quick read: {detail}. Want me to draft a short push to build on it?",
-                f"{lead}, quick read: {detail}. Chaho toh main isko build karne ke liye ek short push draft kar doon?",
+                f"{lead}, {detail}. {next_step_en}",
+                f"{lead}, {detail}. {next_step_hi}",
             )
             return body, plan.rationale_seed
 

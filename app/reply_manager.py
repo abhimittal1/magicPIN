@@ -88,7 +88,10 @@ class ReplyManager:
 
         body = decision.get("body") or "Could you share a little more context?"
         self.store.add_turn(conversation_id, from_role="bot", message=body, ts=utc_now_iso(), action="send")
-        return {"action": "send", "body": body, "cta": "open_ended", "rationale": decision["rationale"]}
+        # When the inbound message is from a customer, surface send_as so the caller
+        # knows the reply should be voiced as the merchant, not as Vera directly.
+        send_as = "merchant_on_behalf" if customer_id else "vera"
+        return {"action": "send", "body": body, "cta": "open_ended", "send_as": send_as, "rationale": decision["rationale"]}
 
     def _existing_trigger_id(self, conversation_id: str) -> str | None:
         record = self.store.get_conversation(conversation_id)

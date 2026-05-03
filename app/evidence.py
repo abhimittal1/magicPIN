@@ -160,7 +160,22 @@ class EvidenceSelector:
             facts.append(EvidenceFact("active_offers", "; ".join(active_offers[:3]), "merchant.offers"))
         signals = merchant.get("signals", [])
         if signals:
-            facts.append(EvidenceFact("merchant_signals", "; ".join(signals[:4]), "merchant.signals"))
+            facts.append(EvidenceFact("merchant_signals", "; ".join(signals[:4]), "merchant.signals"))        # 7d performance deltas — used for trend hooks and compulsion ("calls up 15% this week")
+        delta_7d = performance.get("delta_7d", {}) or {}
+        for key in ("views_pct", "calls_pct"):
+            if delta_7d.get(key) is not None:
+                facts.append(EvidenceFact(f"perf_delta_7d_{key}", humanize_scalar(key, delta_7d[key]), "merchant.performance.delta_7d"))
+        # Review themes — for engagement hooks and voice matching
+        for rt in merchant.get("review_themes", [])[:2]:
+            theme = rt.get("theme", "")
+            if theme:
+                sentiment = rt.get("sentiment", "")
+                count = rt.get("occurrences_30d", 0)
+                theme_text = f"{theme} ({sentiment}, {count} mentions/30d)"
+                quote = rt.get("common_quote", "")
+                if quote:
+                    theme_text += f' — "{quote}"'
+                facts.append(EvidenceFact("review_theme", theme_text, "merchant.review_themes"))
         history = merchant.get("conversation_history", [])
         if history:
             last_turn = history[-1]
@@ -200,17 +215,34 @@ class EvidenceSelector:
         return facts
 
     def _category_facts(self, plan: MessagePlan, category: dict[str, Any], merchant: dict[str, Any]) -> list[EvidenceFact]:
-        peer_stats = category.get("peer_stats", {})
+        peer_stats = category.get("peer_stats", {}) or {}
         facts: list[EvidenceFact] = []
-        if plan.trigger_family in {"performance", "event", "fallback"}:
+        # Peer benchmarks — used for loss-aversion hooks ("your CTR is below peer avg")
+        # and social proof ("3 dentists in your locality...")
+        if plan.trigger_family in {"performance", "event", "fallback", "research", "account", "curiosity"}:
             if peer_stats.get("avg_ctr") is not None:
                 facts.append(EvidenceFact("peer_avg_ctr", humanize_scalar("avg_ctr", peer_stats["avg_ctr"]), "category.peer_stats"))
             if peer_stats.get("avg_review_count") is not None:
                 facts.append(EvidenceFact("peer_avg_review_count", humanize_scalar("avg_review_count", peer_stats["avg_review_count"]), "category.peer_stats"))
-        if plan.trigger_family == "curiosity":
+            if peer_stats.get("avg_rating") is not None:
+                facts.append(EvidenceFact("peer_avg_rating", humanize_scalar("avg_rating", peer_stats["avg_rating"]), "category.peer_stats"))
+            if peer_stats.get("avg_views_30d") is not None:
+                facts.append(EvidenceFact("peer_avg_views", humanize_scalar("avg_views_30d", peer_stats["avg_views_30d"]), "category.peer_stats"))
+        # Seasonal beats — for why-now framing ("wedding whitening peak Oct-Dec")
+        if plan.trigger_family in {"curiosity", "event", "research", "performance", "customer_followup"}:
             seasonal = category.get("seasonal_beats", [])
-            if seasonal:
-                facts.append(EvidenceFact("seasonal_note", seasonal[0].get("note", ""), "category.seasonal_beats"))
+            for beat in seasonal[:2]:
+                note = beat.get("note", "")
+                if note:
+                    month = beat.get("month", "")
+                    label = f"seasonal_{month.replace('-', '_')}" if month else "seasonal_note"
+                    facts.append(EvidenceFact(label, note, "category.seasonal_beats"))
+        # Trend signals — for research/event urgency framing
+        if plan.trigger_family in {"event", "research", "curiosity"}:
+            for sig in category.get("trend_signals", [])[:2]:
+                text = str(sig.get("signal", sig))[:120]
+                if text:
+                    facts.append(EvidenceFact("trend_signal", text, "category.trend_signals"))
         return facts
 
     def _find_digest_item(self, category: dict[str, Any], item_id: str) -> dict[str, Any] | None:

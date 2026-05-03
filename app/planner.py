@@ -103,19 +103,35 @@ class PlanBuilder:
         if resolved.flags.get("placeholder_payload") and family == "account":
             return "make the account issue concrete without pretending there is missing setup data"
         if family == "planning":
-            return "move directly from intent to a concrete draft"
+            return "move directly from intent to a concrete draft — do not re-qualify, give the artifact or the next executable step immediately"
         if family == "curiosity":
-            return "ask one low-friction question and offer a useful artifact in return"
+            return "open with a specific low-friction question and pre-commit to a concrete artifact in return (e.g., 'I'll turn your answer into a 4-line GBP post')"
         if family == "research":
-            return "translate the trigger into a cited insight and one helpful next step"
+            return "lead with the cited fact as a hook, explain the one practical implication for this merchant, then offer a concrete next step; use peer/compliance data when available"
+        if family == "event":
+            if trigger_kind == "ipl_match_today":
+                return "lead with a counter-intuitive or loss-aversion insight about IPL impact on covers/orders; reference the merchant's active offer; end with a specific effort-capped CTA ('10 min')"
+            if trigger_kind == "festival_upcoming":
+                return "frame as a peak booking window using urgency; reference the merchant's active offer or category peak timing; use 'competitors will be pushing this week' loss-aversion if no offer present"
+            if trigger_kind == "competitor_opened":
+                return "lead with specific loss-aversion framing (competitor name + distance if available); propose ONE concrete differentiation action tied to the merchant's current offer or strengths"
+            if trigger_kind == "supply_alert":
+                return "state the exact SKU/product risk and the recommended action clearly; frame as patient-safety or compliance urgency, not just stock management"
+            return "lead with the single strongest why-now hook from the trigger; add one category-specific insight; end with an effort-capped CTA"
         if family == "performance":
-            return "explain why now using merchant numbers and suggest one practical action"
+            if trigger_kind in {"perf_dip", "seasonal_perf_dip"}:
+                return "compare the dip to the peer benchmark from approved facts; propose one specific recovery action tied to the merchant's offers or content calendar; frame as 'here is the likely fix'"
+            if trigger_kind == "perf_spike":
+                return "anchor the spike to a concrete cause if available (seasonal/trend/recent action); compare CTR or calls to peer average; propose ONE action to lock in the momentum before it fades"
+            if trigger_kind == "milestone_reached":
+                return "congratulate briefly then immediately pivot to ONE concrete next-step action (GBP post + broadcast, not a question); make the action feel low-effort and time-bounded"
+            return "explain the metric movement with one data anchor and suggest one specific action"
         if family == "customer_followup":
-            return "send a precise reminder or re-engagement note that respects customer preferences"
+            return "send a precise, warm reminder that uses the customer's name, references the specific service/slot/offer, and ends with a single easy reply-prompt"
         if family == "customer_sparse":
             return "send a cautious continuity follow-up without inventing missing logistics"
         if family == "account":
-            return "make the account issue concrete and propose one clear next step"
+            return "make the account issue concrete and propose one clear next step with a binary yes/no CTA"
         return f"handle {trigger_kind} safely without inventing details"
 
     def _rationale_seed(self, family: str, trigger_kind: str, resolved: ResolvedContext) -> str:
