@@ -83,9 +83,6 @@ async def tick(body: TickRequest) -> TickResponse:
         suppression_key = resolved.trigger.get("suppression_key")
         if store.is_suppressed(suppression_key):
             continue
-        expires_at = resolved.trigger.get("expires_at")
-        if expires_at and body.now >= expires_at:
-            continue
         plan = compose_service.plan(resolved)
         score = ranker.score(resolved, plan)
         candidates.append((score, trigger_id))

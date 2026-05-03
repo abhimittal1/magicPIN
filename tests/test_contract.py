@@ -147,6 +147,49 @@ def test_tick_composes_seed_message() -> None:
     assert payload["actions"][0]["body"]
 
 
+def test_tick_does_not_drop_judge_supplied_trigger_for_past_expires_at() -> None:
+    category = {
+        "slug": "restaurants",
+        "voice": {"tone": "operator", "register": "practical", "vocab_taboo": ["guaranteed"]},
+        "peer_stats": {"avg_ctr": 0.03},
+    }
+    merchant = {
+        "merchant_id": "m_ipl",
+        "category_slug": "restaurants",
+        "identity": {"name": "Pizza Junction", "owner_first_name": "Rahul", "locality": "Delhi", "languages": ["en", "hi"]},
+        "subscription": {"status": "active", "days_remaining": 82},
+        "performance": {"views": 2410, "calls": 18, "ctr": 0.021},
+        "offers": [{"title": "BOGO Pizza", "status": "active"}],
+        "signals": ["match_day_demand"],
+        "conversation_history": [],
+        "customer_aggregate": {},
+    }
+    trigger = {
+        "id": "trg_ipl",
+        "scope": "merchant",
+        "kind": "ipl_match_today",
+        "source": "external",
+        "merchant_id": "m_ipl",
+        "customer_id": None,
+        "payload": {"match": "DC vs MI", "venue": "Arun Jaitley Stadium", "is_weeknight": False},
+        "urgency": 3,
+        "suppression_key": "ipl:m_ipl:test",
+        "expires_at": "2026-04-26T23:59:59+05:30",
+    }
+
+    client.post("/v1/context", json={"scope": "category", "context_id": "restaurants", "version": 1, "payload": category, "delivered_at": utc_now_iso()})
+    client.post("/v1/context", json={"scope": "merchant", "context_id": "m_ipl", "version": 1, "payload": merchant, "delivered_at": utc_now_iso()})
+    client.post("/v1/context", json={"scope": "trigger", "context_id": "trg_ipl", "version": 1, "payload": trigger, "delivered_at": utc_now_iso()})
+
+    response = client.post("/v1/tick", json={"now": "2026-05-03T10:00:00Z", "available_triggers": ["trg_ipl"]})
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert len(payload["actions"]) == 1
+    assert payload["actions"][0]["trigger_id"] == "trg_ipl"
+    assert payload["actions"][0]["body"]
+
+
 def test_reply_stop_ends() -> None:
     response = client.post(
         "/v1/reply",
