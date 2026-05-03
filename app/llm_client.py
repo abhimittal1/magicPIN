@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
@@ -133,10 +134,27 @@ If from_role == "customer":
 - If customer says "Yes please book me for [day/time]": confirm the appointment with specific details (day, time, business name). Do NOT invent a confirmation system — just acknowledge warmly and confirm the details.
 - If customer asks about an offer/price: use the active offer from Key facts verbatim.
 - Never mention Vera, magicpin infrastructure, or merchant analytics to a customer.
+- If the customer says they are busy or to ping them later (e.g. "I'm busy right now, ping me later", "message me tomorrow", "not now"), do NOT send a reply — instead, use action=wait with an appropriate wait_seconds value.
+- If the customer says something that clearly ends the conversation (e.g. "Thank you, that's all", "No thanks", "Don't contact me again"), use action=end.
+- Try to engage and keep the conversation going if they ask a question or express interest, but if they explicitly say yes to a booking or offer, confirm that specifically instead of asking another question.
+
+
 
 If from_role == "merchant":
 - You are replying as Vera, magicpin's merchant success assistant.
 - Use the full scope rules above.
+- Voice: warm but sharp category-aware operator. You help them run their business, not sell to them. Use the merchant's own language style and match their formality level.
+- Language: match the language of the merchant's message exactly (English → English, Hinglish → Hinglish).
+- Use specific facts from the context to answer questions about performance, offers, research, or next steps on magicpin. Never say "I'll keep this grounded in the context" — just answer with the specific fact.
+- If the merchant wants to move forward (e.g. "Ok let's do it", "go ahead", "what's next", "haan theek hai", "next kya hoga"), give one concrete next step immediately. Do NOT ask any further qualification questions or say vague lines like "let me check on that".
+- If the merchant asks a question that is OUT OF SCOPE (e.g. "Can you recommend a good accountant?"), briefly acknowledge that it's outside your scope, then redirect to one relevant thing you CAN help with from the current thread (e.g. "I can't help with accounting, but I can help you promote your latest offer on magicpin. Would you like me to draft a post for that?").
+- Never invent numbers, dates, offers, or names not in the provided context.
+- If the merchant explicitly says they are busy or to ping them later (e.g. "I'm busy right now, ping me later", "message me tomorrow", "not now"), do NOT send a reply — instead, use action=wait with an appropriate wait_seconds value.
+- If the merchant says something that clearly ends the conversation or asks you to stop (e.g. "Stop messaging me", "Don't contact me again"), use action=end.
+- Try to engage and keep the conversation going if they ask a question or express interest, but if they explicitly say yes to a next step, give that next step specifically instead of asking another question.
+- Be especially careful to follow the scope rules with merchants. If they ask about something outside your scope, do NOT answer it directly — instead, acknowledge it's outside your scope and then pivot back to something relevant you CAN help with from the current thread.
+- If you genuinely cannot understand the merchant's message, ask one focused clarification question instead of trying to guess.
+
 
 Response rules:
 - Mirror the language of the latest message exactly. English in, English out. Hinglish in, Hinglish out.
@@ -413,6 +431,10 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         turns: list,
         resolved: ResolvedContext | None,
     ) -> dict:
+        if from_role == "customer":
+            customer_decision = self._customer_reply_fast_path(message, resolved)
+            if customer_decision is not None:
+                return customer_decision
         if self._reply_decision_chain is None:
             return self._reply_decision_fallback(message, from_role, resolved)
         try:
@@ -434,6 +456,10 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             })
             if result.action == "send" and not (result.body or "").strip():
                 return self._reply_decision_fallback(message, from_role, resolved)
+            if from_role == "customer" and result.action == "send":
+                customer_decision = self._customer_reply_fast_path(message, resolved)
+                if customer_decision is not None and self._customer_reply_needs_repair(result.body or "", resolved):
+                    return customer_decision
             return {
                 "action": result.action,
                 "body": result.body.strip() if result.body else None,
@@ -622,6 +648,11 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         resolved: ResolvedContext | None,
     ) -> dict:
         """Absolute last-resort fallback — only reached when the LLM chain is completely unavailable."""
+        if from_role == "customer":
+            customer_decision = self._customer_reply_fast_path(message, resolved)
+            if customer_decision is not None:
+                return customer_decision
+            return self._customer_generic_reply(message, resolved)
         body, rationale = self._chat_fallback(message, from_role, resolved)
         if rationale == "busy_wait":
             return {
@@ -636,6 +667,130 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             "rationale": rationale,
             "wait_seconds": None,
         }
+
+    def _customer_reply_fast_path(self, message: str, resolved: ResolvedContext | None) -> dict | None:
+        text = message.lower()
+        booking_words = {"book", "booking", "confirm", "slot", "appointment", "yes", "haan"}
+        if any(word in text for word in booking_words) and self._customer_message_mentions_slot(message, resolved):
+            return self._customer_booking_confirmation(message, resolved)
+        if any(word in text for word in ["price", "cost", "offer", "charges", "kitna", "rate"]):
+            return self._customer_offer_reply(resolved)
+        if any(word in text for word in ["reschedule", "change time", "another time", "different time"]):
+            return self._customer_reschedule_reply(resolved)
+        return None
+
+    def _customer_message_mentions_slot(self, message: str, resolved: ResolvedContext | None) -> bool:
+        text = message.lower()
+        if any(day in text for day in ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]):
+            return True
+        if "am" in text or "pm" in text:
+            return True
+        payload = ((resolved.trigger if resolved else {}) or {}).get("payload", {}) or {}
+        for slot in payload.get("available_slots", []) or []:
+            label = str(slot.get("label", "")).lower()
+            if label and label in text:
+                return True
+        return False
+
+    def _customer_booking_confirmation(self, message: str, resolved: ResolvedContext | None) -> dict:
+        merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
+        if merchant_name == "the merchant":
+            merchant_name = "the business"
+        customer_name = customer_salutation(resolved.customer if resolved else None)
+        slot = self._requested_slot_label(message, resolved)
+        active_offer = self._active_offer_title(resolved)
+        greeting = f"Hi {customer_name}, " if customer_name and customer_name != "there" else "Hi, "
+        if slot:
+            body = f"{greeting}confirmed: {slot} at {merchant_name}."
+        else:
+            body = f"{greeting}confirmed, we have noted your booking request at {merchant_name}."
+        if active_offer:
+            body = f"{body} Your {active_offer} slot is held."
+        body = f"{body} See you then."
+        return {"action": "send", "body": body, "rationale": "customer_slot_confirm", "wait_seconds": None}
+
+    def _customer_offer_reply(self, resolved: ResolvedContext | None) -> dict:
+        merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
+        if merchant_name == "the merchant":
+            merchant_name = "the business"
+        customer_name = customer_salutation(resolved.customer if resolved else None)
+        active_offer = self._active_offer_title(resolved)
+        greeting = f"Hi {customer_name}, " if customer_name and customer_name != "there" else "Hi, "
+        if active_offer:
+            body = f"{greeting}{merchant_name}'s current offer is {active_offer}. Reply with your preferred time and we will help hold a slot."
+        else:
+            body = f"{greeting}thanks for checking with {merchant_name}. Reply with the service you want and we will help with the next step."
+        return {"action": "send", "body": body, "rationale": "customer_offer_answer", "wait_seconds": None}
+
+    def _customer_reschedule_reply(self, resolved: ResolvedContext | None) -> dict:
+        merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
+        if merchant_name == "the merchant":
+            merchant_name = "the business"
+        customer_name = customer_salutation(resolved.customer if resolved else None)
+        greeting = f"Hi {customer_name}, " if customer_name and customer_name != "there" else "Hi, "
+        body = f"{greeting}no problem. Tell us the day and time that works for you, and {merchant_name} will help adjust the slot."
+        return {"action": "send", "body": body, "rationale": "customer_reschedule", "wait_seconds": None}
+
+    def _customer_generic_reply(self, message: str, resolved: ResolvedContext | None) -> dict:
+        merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
+        if merchant_name == "the merchant":
+            merchant_name = "the business"
+        customer_name = customer_salutation(resolved.customer if resolved else None)
+        greeting = f"Hi {customer_name}, " if customer_name and customer_name != "there" else "Hi, "
+        body = f"{greeting}thanks, we have noted this for {merchant_name}. Reply here with your preferred day and time if you want help booking."
+        return {"action": "send", "body": body, "rationale": "customer_in_scope_reply", "wait_seconds": None}
+
+    def _requested_slot_label(self, message: str, resolved: ResolvedContext | None) -> str:
+        payload = ((resolved.trigger if resolved else {}) or {}).get("payload", {}) or {}
+        slots = payload.get("available_slots", []) or []
+        text = message.lower().replace(",", " ")
+        best_label = ""
+        best_score = 0
+        for slot in slots:
+            label = str(slot.get("label", "")).strip()
+            if not label:
+                continue
+            label_tokens = [token.strip().lower().strip(".") for token in label.replace(",", " ").split() if token.strip()]
+            score = sum(1 for token in label_tokens if token in text)
+            if score > best_score:
+                best_label = label
+                best_score = score
+        if best_score >= 2:
+            return best_label
+        return self._slot_label_from_message(message)
+
+    def _slot_label_from_message(self, message: str) -> str:
+        patterns = [
+            r"\b((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\.?\s+\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))\b",
+            r"\b((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\.?\s+\d{1,2},?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))\b",
+            r"\b(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if match:
+                return " ".join(match.group(1).replace(",", ", ").split())
+        return ""
+
+    def _active_offer_title(self, resolved: ResolvedContext | None) -> str:
+        merchant = (resolved.merchant if resolved else {}) or {}
+        for offer in merchant.get("offers", []):
+            if offer.get("status") == "active" and offer.get("title"):
+                return str(offer["title"])
+        return ""
+
+    def _customer_reply_needs_repair(self, body: str, resolved: ResolvedContext | None) -> bool:
+        text = body.strip().lower()
+        if not text:
+            return True
+        if "vera" in text or "magicpin" in text or "ctr" in text or "views" in text or "calls" in text:
+            return True
+        customer_name = customer_salutation(resolved.customer if resolved else None)
+        if customer_name and customer_name != "there" and customer_name.lower() not in text[:80]:
+            return True
+        merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
+        if merchant_name and merchant_name != "the merchant" and merchant_name.lower() not in text:
+            return True
+        return False
 
     def _looks_like_identity_question(self, text: str) -> bool:
         identity_words = [
@@ -820,15 +975,15 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             if resolved.flags.get("placeholder_payload"):
                 body = self._pick_copy(
                     prefers_hinglish,
-                    f"{lead}, demand patterns are shifting in your category. Want me to draft one stock or display action for this week?",
-                    f"{lead}, aapki category mein demand pattern shift ho raha hai. Chaho toh main is week ke liye ek stock ya display action draft kar doon?",
+                    f"{lead}, demand patterns are shifting in your category this week. Best next step: one stock/display action tied to your active offer or top service. Want me to draft it?",
+                    f"{lead}, aapki category mein demand pattern is week shift ho raha hai. Best next step: active offer ya top service se linked ek stock/display action. Draft kar doon?",
                 )
                 return body, plan.rationale_seed
             season = self._payload_text(payload, "season") or "the current season"
             body = self._pick_copy(
                 prefers_hinglish,
-                f"{lead}, demand patterns are shifting for {season}. Want me to draft one stock or display action for this week?",
-                f"{lead}, {season} ke liye demand pattern shift ho raha hai. Chaho toh main is week ke liye ek stock ya display action draft kar doon?",
+                f"{lead}, demand patterns are shifting for {season}. Best next step: one stock/display action this week, not a broad campaign. Want me to draft it?",
+                f"{lead}, {season} ke liye demand pattern shift ho raha hai. Best next step: is week ek stock/display action, broad campaign nahi. Draft kar doon?",
             )
             return body, plan.rationale_seed
 
@@ -890,8 +1045,8 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             if resolved.flags.get("placeholder_payload"):
                 body = self._pick_copy(
                     prefers_hinglish,
-                    f"{lead}, one key metric looks softer than usual right now. Want me to draft one focused recovery step for this week?",
-                    f"{lead}, ek key metric abhi thoda soft lag raha hai. Chaho toh main is week ke liye ek focused recovery step draft kar doon?",
+                    f"{lead}, one key metric is softer than usual right now. Best next step: one focused recovery post or offer update in the next 48h. Want me to draft it?",
+                    f"{lead}, ek key metric abhi usual se soft hai. Best next step: next 48h mein ek focused recovery post ya offer update. Draft kar doon?",
                 )
                 return body, plan.rationale_seed
             metric = self._metric_name(str(payload.get("metric", "performance")))
@@ -914,8 +1069,8 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             if resolved.flags.get("placeholder_payload"):
                 body = self._pick_copy(
                     prefers_hinglish,
-                    f"{lead}, one key metric looks stronger than usual right now. Want me to draft one way to keep the momentum going?",
-                    f"{lead}, ek key metric abhi stronger dikh raha hai. Chaho toh main momentum banaye rakhne ka ek step draft kar doon?",
+                    f"{lead}, one key metric is stronger than usual right now. Best next step: lock the momentum with one GBP post while attention is warm. Want me to draft it?",
+                    f"{lead}, ek key metric abhi usual se stronger hai. Best next step: attention warm hai tab ek GBP post se momentum lock karo. Draft kar doon?",
                 )
                 return body, plan.rationale_seed
             metric = self._metric_name(str(payload.get("metric", "performance")))
@@ -1067,7 +1222,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         slot_text = self._fact_text(plan, "available_slots")
 
         if trigger_kind == "recall_due":
-            service_due = self._payload_text(payload, "service_due") or "your next check-in"
+            service_due = (self._payload_text(payload, "service_due") or "your next check-in").replace("6 month", "6-month")
             body = self._pick_copy(
                 prefers_hinglish,
                 f"{intro} It is time for {service_due}.",
@@ -1082,8 +1237,8 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             if active_offer:
                 body = self._pick_copy(
                     prefers_hinglish,
-                    f"{body} Current offer: {active_offer}.",
-                    f"{body} Current offer: {active_offer}.",
+                    f"{body} {active_offer} is available.",
+                    f"{body} {active_offer} available hai.",
                 )
             body = self._pick_copy(
                 prefers_hinglish,
@@ -1116,6 +1271,21 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             return body, plan.rationale_seed
 
         if trigger_kind in {"customer_lapsed_soft", "customer_lapsed_hard"}:
+            days = self._payload_text(payload, "days_since_last_visit")
+            previous_focus = self._payload_text(payload, "previous_focus")
+            membership_months = self._payload_text(payload, "previous_membership_months")
+            if trigger_kind == "customer_lapsed_hard" and (days or previous_focus or active_offer):
+                elapsed = f"{days} days" if days else "a while"
+                body = f"{intro} It has been {elapsed} since your last visit"
+                if previous_focus:
+                    body = f"{body}, and your earlier focus was {previous_focus}"
+                if membership_months:
+                    body = f"{body} during your {membership_months}-month run"
+                body = f"{body}. No pressure, we can restart simple."
+                if active_offer:
+                    body = f"{body} The {active_offer} option is available."
+                body = f"{body} Reply YES if you want us to hold an easy comeback slot."
+                return body, plan.rationale_seed
             body = self._pick_copy(
                 prefers_hinglish,
                 f"{intro} Just checking in in case you still need us.",
@@ -1174,6 +1344,13 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
     ) -> tuple[str, str]:
         trigger_kind = resolved.trigger.get("kind", "")
         intro = self._customer_intro(customer_name, merchant_name)
+
+        if resolved.flags.get("category_trigger_mismatch"):
+            return self._pick_copy(
+                prefers_hinglish,
+                f"{intro} Quick check-in from us. Reply here if you want help with your next visit or timing.",
+                f"{intro} Quick check-in from us. Next visit ya timing mein help chahiye ho toh yahin reply kar do.",
+            ), plan.rationale_seed
 
         if trigger_kind == "appointment_tomorrow":
             return self._pick_copy(

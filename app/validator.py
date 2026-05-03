@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from app.evidence import humanize_scalar
 from app.schemas import ComposedMessage, MessagePlan, ResolvedContext
 
 
 NUM_PATTERN = re.compile(r"\b\d[\dTtZz,.:/%+-]*\b")
+OPERATIONAL_TIME_TOKENS = {"1", "2", "3", "4", "5", "10", "15", "30", "48", "90"}
 GENERIC_REPLY_PATTERNS = [
     re.compile(r"let me look into that", re.IGNORECASE),
     re.compile(r"give me a moment", re.IGNORECASE),
@@ -49,6 +51,27 @@ def _extract_numeric_tokens(text: str) -> set[str]:
     return tokens
 
 
+def _numbers_from_context_value(value: Any, key: str = "") -> set[str]:
+    tokens: set[str] = set()
+    if value is None or isinstance(value, bool):
+        return tokens
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            tokens.update(_numbers_from_context_value(child_value, str(child_key)))
+        return tokens
+    if isinstance(value, list):
+        for item in value:
+            tokens.update(_numbers_from_context_value(item, key))
+        return tokens
+    if isinstance(value, (int, float)):
+        tokens.update(_extract_numeric_tokens(str(value)))
+        tokens.update(_extract_numeric_tokens(humanize_scalar(key, value)))
+        return tokens
+    if isinstance(value, str):
+        tokens.update(_extract_numeric_tokens(value))
+    return tokens
+
+
 class MessageValidator:
     def validate(self, composed: ComposedMessage, plan: MessagePlan, resolved: ResolvedContext, previous_body: str | None = None) -> list[str]:
         issues: list[str] = []
@@ -66,6 +89,9 @@ class MessageValidator:
         allowed_numbers = set()
         for fact in plan.evidence_facts:
             allowed_numbers.update(_extract_numeric_tokens(fact.text))
+        for context in (resolved.category, resolved.merchant, resolved.trigger, resolved.customer or {}):
+            allowed_numbers.update(_numbers_from_context_value(context))
+        allowed_numbers.update(OPERATIONAL_TIME_TOKENS)
         if plan.cta_type == "multi_choice_slot":
             allowed_numbers.update({"1", "2", "3"})
         body_numbers = _extract_numeric_tokens(composed.body)
@@ -73,6 +99,9 @@ class MessageValidator:
         if unsupported_numbers:
             issues.append("unsupported_numbers:" + ",".join(unsupported_numbers[:5]))
         if plan.send_as == "merchant_on_behalf":
+            customer_name = (resolved.customer or {}).get("identity", {}).get("name", "")
+            if customer_name and customer_name.lower() not in body_lower[:80]:
+                issues.append("missing_customer_name")
             active_offers = resolved.flags.get("active_offer_titles", [])
             if active_offers:
                 rupee_body = any(offer in composed.body for offer in active_offers)

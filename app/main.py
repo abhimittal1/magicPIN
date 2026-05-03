@@ -88,7 +88,8 @@ async def tick(body: TickRequest) -> TickResponse:
         candidates.append((score, trigger_id))
 
     actions: list[TickAction] = []
-    for _, trigger_id in sorted(candidates, key=lambda item: item[0], reverse=True)[: settings.max_actions_per_tick]:
+    effective_limit = min(max(settings.max_actions_per_tick, len(candidates)), 20)
+    for _, trigger_id in sorted(candidates, key=lambda item: item[0], reverse=True)[:effective_limit]:
         resolved = resolver.resolve_trigger_id(trigger_id)
         if resolved is None:
             continue
@@ -131,6 +132,7 @@ async def reply(body: ReplyRequest) -> ReplyResponse:
         conversation_id=body.conversation_id,
         merchant_id=body.merchant_id,
         customer_id=body.customer_id,
+        from_role=body.from_role,
         message=body.message,
         received_at=body.received_at,
         turn_number=body.turn_number,
