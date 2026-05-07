@@ -8,46 +8,46 @@ from langchain_openai import ChatOpenAI
 
 from app.config import Settings
 from app.evidence import humanize_scalar
-from app.schemas import ComposedMessage, LLMDraft, LLMReplyDecision, MessagePlan, ResolvedContext
-from app.voices import customer_salutation, language_hint, merchant_salutation
+from app.schemas import OutreachDraft, WriterOutput, WriterDecision, SendStrategy, AssembledScene
+from app.voices import patron_name, detect_language, opening_name
 
 
 SYSTEM_PROMPT = """You are Vera, magicpin's merchant success manager, writing one WhatsApp message — to a merchant or to a customer on the merchant's behalf.
 
---- OUTPUT CONTRACT ---
+--- JSON OUTPUT FORMAT ---
 Return valid JSON with exactly two keys: body (the WhatsApp message text), rationale (one short sentence explaining the core strategic choice you made).
 - body: WhatsApp-native, typically 2–4 sentences. Concise but complete.
 - rationale: factual, not promotional. "Used JIDA 3-mo recall stat to anchor urgency for high-risk adult segment" is good. "Created a compelling message" is not.
 
---- WHAT THE JUDGE SCORES ---
-1. SPECIFICITY — anchor on one concrete, verifiable fact: a number, a date, a source citation, a peer benchmark, a named segment. "Haircut @ ₹99" beats "10% off". "2,100-patient JIDA trial" beats "studies show". Never say grow your business, boost sales, improve visibility, or increase revenue without a specific number attached.
-2. CATEGORY FIT — voice, vocabulary, and offer format must match the vertical:
+--- WHAT MAKES A MESSAGE WORK ---
+1. DATA ANCHORING — ground every claim in one concrete, verifiable detail: a number, a date, a source citation, a peer benchmark, a named segment. "Haircut @ ₹99" beats "10% off". "2,100-patient JIDA trial" beats "studies show". Never say grow your business, boost sales, improve visibility, or increase revenue without a specific number attached.
+2. VERTICAL VOICE — vocabulary and offer format must match the business type:
    • dentists/doctors: clinical-peer tone, technical terms OK ("fluoride recall", "caries"), NEVER retail-promo, NEVER "AMAZING DEAL"
    • salons/spas: warm-aspirational, service+price preferred ("Haircut @ ₹99")
    • restaurants: appetite-driven, location-specific, occasion-aware
    • gyms/fitness: motivation + results, slot urgency OK
    • pharmacies: compliance-first, empathetic, never prescribes
-3. MERCHANT FIT — personalized to THIS merchant: use their CTR, their patient counts, their offers, their locality, their conversation history. Match the language preference exactly (hi-en mix → Hinglish, English → English, Hindi → Hindi).
-4. TRIGGER RELEVANCE — the first sentence must make it obvious WHY this message is being sent RIGHT NOW. Use the trigger kind to frame:
+3. BUSINESS PERSONALISATION — tailored to THIS merchant: use their CTR, their patient counts, their offers, their locality, their conversation history. Match the language preference exactly (hi-en mix → Hinglish, English → English, Hindi → Hindi).
+4. MOMENT FRAMING — the opening sentence must immediately signal WHY this message is arriving right now. Use the trigger kind to set the frame:
    • research_digest → "New [journal] item landed / relevant to your [segment]"
    • perf_spike → "Your [metric] jumped [X]% this week"
-   • perf_dip → "[Metric] dropped [X]% — here's the likely fix"
+   • perf_dip → "[Metric] dipped [X]% — here's the most likely lever"
    • recall_due → "[Customer name]'s [interval] recall window just opened"
    • dormant_with_vera → re-engage without re-introducing yourself (they know who you are)
-   • festival_upcoming → tie to the merchant's specific category + offer
-   • milestone_reached → congratulate + immediate next step
-   • competitor_opened → local loss-aversion framing
-   • review_theme_emerged → specific theme + quote from context
-   • scheduled_recurring → curiosity or knowledge-driven; never reminder-only
-5. ENGAGEMENT COMPULSION — use exactly ONE of these levers (pick the strongest given the context):
-   • Loss aversion: "you're missing X" / "before this window closes" / "competitor just opened nearby"
-   • Social proof: "3 dentists in your locality did Y this month" (only if peer data supports it)
-   • Effort externalization: "I've drafted it — just say go" / "5-minute setup"
-   • Curiosity: "want to see who?" / "want the full list?" / "here's the one thing that stands out"
-   • Specificity hook: the concrete fact IS the hook (lead with the number)
-   • Single binary commitment: end with "Reply YES to proceed" or "Want me to send it?" — not multi-choice
+   • festival_upcoming → connect to the merchant's specific category + active offer
+   • milestone_reached → congratulate + name the immediate next step
+   • competitor_opened → frame around local proximity and missed footfall
+   • review_theme_emerged → surface the specific theme + a real quote from context
+   • scheduled_recurring → lead with curiosity or new knowledge; never make it feel like a reminder
+5. RESPONSE PULL — include exactly ONE psychological lever (pick the strongest given the facts):
+   • Loss framing: "you're missing X" / "before this window closes" / "competitor just opened nearby"
+   • Peer evidence: "3 dentists in your locality did Y this month" (only when peer data is present)
+   • Effort removal: "I've already drafted it — just say go" / "5-minute setup"
+   • Curiosity gap: "want to see who?" / "want the full breakdown?" / "here's the one thing that stands out"
+   • Fact-as-hook: let the concrete number or stat BE the opening hook
+   • Binary close: end with "Reply YES to proceed" or "Want me to send it?" — never multi-choice
 
---- VOICE RULES ---
+--- WRITING STYLE ---
 - WhatsApp-native: warm, direct, no corporate stiffness
 - 2–4 sentences typical; one CTA at the end
 - Natural Hinglish (Roman script) when language hints say hi-en mix or code-mix is Hindi-English
@@ -56,13 +56,13 @@ Return valid JSON with exactly two keys: body (the WhatsApp message text), ratio
 - Merchant-facing: peer/colleague tone — you're helping them run their business, not selling to them
 - Customer-facing: warm and helpful on behalf of the merchant — simpler, no jargon
 
---- NON-NEGOTIABLE RULES ---
+--- HARD CONSTRAINTS ---
 - Use only the supplied approved facts. Never invent numbers, dates, prices, citations, competitor names, or patient names.
 - When an approved fact includes service-and-price (e.g., "Dental Cleaning @ ₹299"), use that exact phrasing — do NOT convert to a percentage discount.
-- Start with the strongest why-now signal from the trigger or evidence. Make the first sentence earn its place.
+- Open with the strongest why-now signal from the trigger or evidence. The first sentence must earn its place.
 - One primary CTA only. Binary YES/STOP for action triggers. Open-ended or no CTA for pure information triggers.
-- If the trigger payload or evidence is sparse, stay conservative: anchor on the clearest available single fact and one concrete next step. Do not pad with filler.
-- Never qualify the merchant's own decision after they have already expressed intent. If they said yes, move to action mode.
+- If the trigger payload or evidence is sparse, stay conservative: anchor on the clearest single fact and one concrete next step. Do not pad with filler.
+- Never re-qualify after the merchant has already expressed intent. If they said yes, shift to action immediately.
 """
 
 
@@ -100,8 +100,8 @@ REPLY_DECISION_SYSTEM_PROMPT = """You are Vera, magicpin's merchant success assi
 
 Your job: decide how to handle the latest inbound message and produce the exact reply in one step.
 
---- VERA'S SCOPE ---
-IN SCOPE — you CAN and SHOULD answer these:
+--- WHAT VERA HANDLES ---
+YES — topics Vera actively helps with:
 - Patient or customer targeting: who to reach first, which segment to prioritise, lapsed/high-risk patient prioritisation
 - Recall intervals, treatment follow-ups, reactivation strategies
 - Profile performance metrics: views, CTR, calls, directions, peer comparisons — use the numbers from Key facts
@@ -111,19 +111,19 @@ IN SCOPE — you CAN and SHOULD answer these:
 - Appointment slots and customer outreach messaging
 - Any question about running or growing the merchant's clinic/business on magicpin
 
-OUT OF SCOPE — you CANNOT help with these:
+NO — topics outside Vera's remit:
 - Accounting, GST, tax filing, income tax returns, bookkeeping
 - Legal advice, contracts, or finding a lawyer
 - Payroll software, HR tools, or hiring non-medical staff
-- Anything completely unrelated to the merchant's business on magicpin
---- END SCOPE ---
+- Anything with no connection to the merchant's business on magicpin
+--- END OF VERA'S REMIT ---
 
 Decision rules:
 - action=send: use for all in-scope questions, out-of-scope redirects, identity questions, commits, and clarification asks.
 - action=wait: use ONLY when the person explicitly says they are busy right now or asks you to come back later (e.g. "I'm busy", "ping me later", "message me tomorrow", "not now"). This means NO reply is sent — the system will schedule a follow-up automatically. Do NOT use action=send with a body saying "I'll message you later" — use action=wait instead.
 - action=end: use ONLY if the message clearly ends the conversation or asks you to stop entirely.
 
---- CUSTOMER vs MERCHANT MODE ---
+--- REPLY MODE BASED ON SENDER ---
 The from_role field in the message tells you who sent the latest message.
 
 If from_role == "customer":
@@ -169,19 +169,22 @@ Response rules:
 - If the message is genuinely unclear: ask one focused clarification question.
 - Never invent facts, offers, numbers, names, dates, or capabilities not present in the provided context.
 
-Challenge-specific examples:
+Worked examples:
 1. Merchant: "Ok lets do it. Whats next?"
-    Good: action=send, rationale=commit_action, body like "Great. I'll draft the next step now and keep it specific to your high-risk adult recall plan."
-    Bad: asking another qualification question or saying a vague line like "give me a moment".
+    Right: action=send, rationale=commit_action, body gives one concrete next step tied to the active thread (e.g. "Great. Drafting the recall message now — targeting your 124 high-risk adult patients first.").
+    Wrong: re-asking qualifying questions or stalling with "give me a moment".
 2. Merchant: "Which patients specifically should I target first?"
-    Good: action=send, rationale=in_scope_answer, body uses the provided patient segments such as high-risk adults or lapsed patients.
+    Right: action=send, rationale=in_scope_answer, body names the actual segment from context (high-risk adults, lapsed patients, etc.).
+    Wrong: generic advice not grounded in the provided patient data.
 3. Merchant: "Can you recommend a good accountant?"
-    Good: action=send, rationale=out_of_scope_redirect, body briefly redirects to profile visibility, offers, outreach, or the current thread.
+    Right: action=send, rationale=out_of_scope_redirect, body briefly says that's outside what Vera handles, then pivots to one concrete thing Vera CAN help with from the current thread.
+    Wrong: attempting to answer the accounting question.
 4. Merchant: "I am busy right now, ping me later."
-    Good: action=wait, rationale=busy_wait, wait_seconds set.
+    Right: action=wait, rationale=busy_wait, wait_seconds set to an appropriate value. No body sent.
+    Wrong: action=send with a body saying you'll follow up later.
 5. Customer: "Yes please book me for Wed 5 Nov, 6pm."
-    Good: action=send, rationale=in_scope_answer, body like "Hi Priya, you're booked for Wed Nov 5 at 6pm at Dr. Meera's Dental Clinic. See you then!" (use merchant name, customer name, specific time)
-    Bad: generic "Great! I've booked your appointment." or addressing them as a merchant.
+    Right: action=send, rationale=in_scope_answer, body like "Hi Priya, you're confirmed for Wed Nov 5 at 6pm at Dr. Meera's Dental Clinic. See you then!" — uses both names and the exact time.
+    Wrong: generic "Great! I've booked your appointment." with no names or specific details.
 
 Return valid JSON with keys: action, body, rationale, wait_seconds.
 - body is required for action=send.
@@ -208,7 +211,7 @@ Latest message from {from_role}: "{message}"
 Decide the action and write Vera's reply."""
 
 
-class WordingService:
+class LLMWriter:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._structured_chain = None
@@ -225,12 +228,12 @@ class WordingService:
                 ("system", REPLY_SYSTEM_PROMPT),
                 ("human", REPLY_HUMAN_TEMPLATE),
             ])
-            self._reply_chain = reply_prompt | llm.with_structured_output(LLMDraft)
+            self._reply_chain = reply_prompt | llm.with_structured_output(WriterOutput)
             reply_decision_prompt = ChatPromptTemplate.from_messages([
                 ("system", REPLY_DECISION_SYSTEM_PROMPT),
                 ("human", REPLY_DECISION_HUMAN_TEMPLATE),
             ])
-            self._reply_decision_chain = reply_decision_prompt | llm.with_structured_output(LLMReplyDecision)
+            self._reply_decision_chain = reply_decision_prompt | llm.with_structured_output(WriterDecision)
             prompt = ChatPromptTemplate.from_messages(
                 [
                     ("system", SYSTEM_PROMPT),
@@ -263,10 +266,10 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                     ),
                 ]
             )
-            self._structured_chain = prompt | llm.with_structured_output(LLMDraft)
+            self._structured_chain = prompt | llm.with_structured_output(WriterOutput)
 
-    def draft(self, plan: MessagePlan, resolved: ResolvedContext) -> tuple[str, str]:
-        if plan.trigger_family == "customer_sparse":
+    def draft(self, plan: SendStrategy, resolved: AssembledScene) -> tuple[str, str]:
+        if plan.trigger_family == "patron_sparse":
             return self._fallback(plan, resolved)
         if self._structured_chain is None:
             return self._fallback(plan, resolved)
@@ -281,7 +284,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                 for offer in merchant.get("offers", [])
                 if offer.get("status") == "active" and offer.get("title")
             ]
-            primary_language_hint = language_hint(merchant, resolved.customer)
+            primary_language_hint = detect_language(merchant, resolved.customer)
             language_hints = {
                 "merchant_languages": merchant_languages[:3],
                 "customer_language_pref": customer_identity.get("language_pref"),
@@ -359,7 +362,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         message: str,
         from_role: str,
         turns: list,
-        resolved: ResolvedContext | None,
+        resolved: AssembledScene | None,
     ) -> tuple[str, str]:
         """Generate a contextual conversational reply using the LLM."""
         if self._reply_chain is None:
@@ -374,7 +377,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             signals = ", ".join(merchant.get("signals", [])[:4])
 
             facts_parts: list[str] = []
-            perf = merchant.get("performance", {})
+            perf = merchant.get("metric", {})
             if perf.get("views"):
                 peer_avg = (resolved.category.get("peer_stats", {}) or {}).get("avg_views_30d", "?") if resolved else "?"
                 facts_parts.append(f"- Views (30d): {perf['views']} (peer avg: {peer_avg})")
@@ -429,7 +432,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         message: str,
         from_role: str,
         turns: list,
-        resolved: ResolvedContext | None,
+        resolved: AssembledScene | None,
     ) -> dict:
         if from_role == "customer":
             customer_decision = self._customer_reply_fast_path(message, resolved)
@@ -469,7 +472,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         except Exception:
             return self._reply_decision_fallback(message, from_role, resolved)
 
-    def _reply_context(self, message: str, turns: list, resolved: ResolvedContext | None) -> dict:
+    def _reply_context(self, message: str, turns: list, resolved: AssembledScene | None) -> dict:
         merchant = (resolved.merchant if resolved else {}) or {}
         identity = merchant.get("identity", {})
         merchant_name = identity.get("name", "the merchant")
@@ -498,7 +501,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                     facts_parts.append(f"- Services received: {'; '.join(str(s) for s in c_rel['services_received'][:3])}")
 
         # Performance metrics
-        perf = merchant.get("performance", {})
+        perf = merchant.get("metric", {})
         if perf.get("views"):
             peer_avg = (resolved.category.get("peer_stats", {}) or {}).get("avg_views_30d", "?") if resolved else "?"
             facts_parts.append(f"- Views (30d): {perf['views']} (peer avg: {peer_avg})")
@@ -601,7 +604,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         self,
         message: str,
         from_role: str,
-        resolved: ResolvedContext | None,
+        resolved: AssembledScene | None,
     ) -> tuple[str, str]:
         """Absolute last-resort fallback — only reached when the LLM chain is unavailable or errors."""
         text = message.strip().lower()
@@ -645,7 +648,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         self,
         message: str,
         from_role: str,
-        resolved: ResolvedContext | None,
+        resolved: AssembledScene | None,
     ) -> dict:
         """Absolute last-resort fallback — only reached when the LLM chain is completely unavailable."""
         if from_role == "customer":
@@ -668,7 +671,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             "wait_seconds": None,
         }
 
-    def _customer_reply_fast_path(self, message: str, resolved: ResolvedContext | None) -> dict | None:
+    def _customer_reply_fast_path(self, message: str, resolved: AssembledScene | None) -> dict | None:
         text = message.lower()
         booking_words = {"book", "booking", "confirm", "slot", "appointment", "yes", "haan"}
         if any(word in text for word in booking_words) and self._customer_message_mentions_slot(message, resolved):
@@ -679,7 +682,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             return self._customer_reschedule_reply(resolved)
         return None
 
-    def _customer_message_mentions_slot(self, message: str, resolved: ResolvedContext | None) -> bool:
+    def _customer_message_mentions_slot(self, message: str, resolved: AssembledScene | None) -> bool:
         text = message.lower()
         if any(day in text for day in ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]):
             return True
@@ -692,11 +695,11 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                 return True
         return False
 
-    def _customer_booking_confirmation(self, message: str, resolved: ResolvedContext | None) -> dict:
+    def _customer_booking_confirmation(self, message: str, resolved: AssembledScene | None) -> dict:
         merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
         if merchant_name == "the merchant":
             merchant_name = "the business"
-        customer_name = customer_salutation(resolved.customer if resolved else None)
+        customer_name = patron_name(resolved.customer if resolved else None)
         slot = self._requested_slot_label(message, resolved)
         active_offer = self._active_offer_title(resolved)
         greeting = f"Hi {customer_name}, " if customer_name and customer_name != "there" else "Hi, "
@@ -709,11 +712,11 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         body = f"{body} See you then."
         return {"action": "send", "body": body, "rationale": "customer_slot_confirm", "wait_seconds": None}
 
-    def _customer_offer_reply(self, resolved: ResolvedContext | None) -> dict:
+    def _customer_offer_reply(self, resolved: AssembledScene | None) -> dict:
         merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
         if merchant_name == "the merchant":
             merchant_name = "the business"
-        customer_name = customer_salutation(resolved.customer if resolved else None)
+        customer_name = patron_name(resolved.customer if resolved else None)
         active_offer = self._active_offer_title(resolved)
         greeting = f"Hi {customer_name}, " if customer_name and customer_name != "there" else "Hi, "
         if active_offer:
@@ -722,25 +725,25 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             body = f"{greeting}thanks for checking with {merchant_name}. Reply with the service you want and we will help with the next step."
         return {"action": "send", "body": body, "rationale": "customer_offer_answer", "wait_seconds": None}
 
-    def _customer_reschedule_reply(self, resolved: ResolvedContext | None) -> dict:
+    def _customer_reschedule_reply(self, resolved: AssembledScene | None) -> dict:
         merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
         if merchant_name == "the merchant":
             merchant_name = "the business"
-        customer_name = customer_salutation(resolved.customer if resolved else None)
+        customer_name = patron_name(resolved.customer if resolved else None)
         greeting = f"Hi {customer_name}, " if customer_name and customer_name != "there" else "Hi, "
         body = f"{greeting}no problem. Tell us the day and time that works for you, and {merchant_name} will help adjust the slot."
         return {"action": "send", "body": body, "rationale": "customer_reschedule", "wait_seconds": None}
 
-    def _customer_generic_reply(self, message: str, resolved: ResolvedContext | None) -> dict:
+    def _customer_generic_reply(self, message: str, resolved: AssembledScene | None) -> dict:
         merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
         if merchant_name == "the merchant":
             merchant_name = "the business"
-        customer_name = customer_salutation(resolved.customer if resolved else None)
+        customer_name = patron_name(resolved.customer if resolved else None)
         greeting = f"Hi {customer_name}, " if customer_name and customer_name != "there" else "Hi, "
         body = f"{greeting}thanks, we have noted this for {merchant_name}. Reply here with your preferred day and time if you want help booking."
         return {"action": "send", "body": body, "rationale": "customer_in_scope_reply", "wait_seconds": None}
 
-    def _requested_slot_label(self, message: str, resolved: ResolvedContext | None) -> str:
+    def _requested_slot_label(self, message: str, resolved: AssembledScene | None) -> str:
         payload = ((resolved.trigger if resolved else {}) or {}).get("payload", {}) or {}
         slots = payload.get("available_slots", []) or []
         text = message.lower().replace(",", " ")
@@ -771,20 +774,20 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                 return " ".join(match.group(1).replace(",", ", ").split())
         return ""
 
-    def _active_offer_title(self, resolved: ResolvedContext | None) -> str:
+    def _active_offer_title(self, resolved: AssembledScene | None) -> str:
         merchant = (resolved.merchant if resolved else {}) or {}
         for offer in merchant.get("offers", []):
             if offer.get("status") == "active" and offer.get("title"):
                 return str(offer["title"])
         return ""
 
-    def _customer_reply_needs_repair(self, body: str, resolved: ResolvedContext | None) -> bool:
+    def _customer_reply_needs_repair(self, body: str, resolved: AssembledScene | None) -> bool:
         text = body.strip().lower()
         if not text:
             return True
         if "vera" in text or "magicpin" in text or "ctr" in text or "views" in text or "calls" in text:
             return True
-        customer_name = customer_salutation(resolved.customer if resolved else None)
+        customer_name = patron_name(resolved.customer if resolved else None)
         if customer_name and customer_name != "there" and customer_name.lower() not in text[:80]:
             return True
         merchant_name = self._merchant_name((resolved.merchant if resolved else {}) or {})
@@ -869,16 +872,16 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             return self._clean_text(humanize_scalar(key, value))
         return self._clean_text(str(value))
 
-    def _fact_text(self, plan: MessagePlan, *labels: str) -> str:
+    def _fact_text(self, plan: SendStrategy, *labels: str) -> str:
         for label in labels:
             for fact in plan.evidence_facts:
                 if fact.label == label and fact.text:
                     return fact.text
         return ""
 
-    def _interesting_fact_texts(self, plan: MessagePlan) -> list[str]:
+    def _interesting_fact_texts(self, plan: SendStrategy) -> list[str]:
         skipped_labels = {
-            "merchant_salutation",
+            "opening_name",
             "merchant_name",
             "merchant_locality",
             "customer_name",
@@ -905,7 +908,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         return f"Hi {customer_name}, {merchant_name} here."
 
     def _prefers_hinglish(self, merchant: dict, customer: dict | None) -> bool:
-        hint = language_hint(merchant, customer).lower()
+        hint = detect_language(merchant, customer).lower()
         return "hi" in hint
 
     def _pick_copy(self, prefers_hinglish: bool, english: str, hinglish: str) -> str:
@@ -913,8 +916,8 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
 
     def _fallback_event(
         self,
-        plan: MessagePlan,
-        resolved: ResolvedContext,
+        plan: SendStrategy,
+        resolved: AssembledScene,
         lead: str,
         payload: dict,
         prefers_hinglish: bool,
@@ -1034,8 +1037,8 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
 
     def _fallback_performance(
         self,
-        plan: MessagePlan,
-        resolved: ResolvedContext,
+        plan: SendStrategy,
+        resolved: AssembledScene,
         lead: str,
         payload: dict,
         prefers_hinglish: bool,
@@ -1049,7 +1052,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                     f"{lead}, ek key metric abhi usual se soft hai. Best next step: next 48h mein ek focused recovery post ya offer update. Draft kar doon?",
                 )
                 return body, plan.rationale_seed
-            metric = self._metric_name(str(payload.get("metric", "performance")))
+            metric = self._metric_name(str(payload.get("metric", "metric")))
             delta = self._payload_text(payload, "delta_pct")
             window = self._payload_text(payload, "window")
             verb = self._metric_verb(metric)
@@ -1073,7 +1076,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                     f"{lead}, ek key metric abhi usual se stronger hai. Best next step: attention warm hai tab ek GBP post se momentum lock karo. Draft kar doon?",
                 )
                 return body, plan.rationale_seed
-            metric = self._metric_name(str(payload.get("metric", "performance")))
+            metric = self._metric_name(str(payload.get("metric", "metric")))
             delta = self._payload_text(payload, "delta_pct")
             window = self._payload_text(payload, "window")
             verb = self._metric_verb(metric)
@@ -1081,7 +1084,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             if window:
                 detail = f"{detail} over the last {window}"
             peer_ctr = self._fact_text(plan, "peer_avg_ctr")
-            merchant_perf = resolved.merchant.get("performance", {})
+            merchant_perf = resolved.merchant.get("metric", {})
             ctr_clause = ""
             if merchant_perf.get("ctr") and peer_ctr:
                 try:
@@ -1145,8 +1148,8 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
 
     def _fallback_account(
         self,
-        plan: MessagePlan,
-        resolved: ResolvedContext,
+        plan: SendStrategy,
+        resolved: AssembledScene,
         lead: str,
         payload: dict,
         prefers_hinglish: bool,
@@ -1209,8 +1212,8 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
 
     def _fallback_customer_followup(
         self,
-        plan: MessagePlan,
-        resolved: ResolvedContext,
+        plan: SendStrategy,
+        resolved: AssembledScene,
         customer_name: str,
         merchant_name: str,
         active_offer: str,
@@ -1335,8 +1338,8 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
 
     def _fallback_customer_sparse(
         self,
-        plan: MessagePlan,
-        resolved: ResolvedContext,
+        plan: SendStrategy,
+        resolved: AssembledScene,
         customer_name: str,
         merchant_name: str,
         active_offer: str,
@@ -1411,19 +1414,19 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
             f"{intro} Quick check-in from us. Next step mein help chahiye ho toh yahin reply kar do, hum simple rakhenge.",
         ), plan.rationale_seed
 
-    def _fallback(self, plan: MessagePlan, resolved: ResolvedContext) -> tuple[str, str]:
+    def _fallback(self, plan: SendStrategy, resolved: AssembledScene) -> tuple[str, str]:
         merchant = resolved.merchant
         customer = resolved.customer
         trigger = resolved.trigger
         payload = trigger.get("payload", {}) or {}
-        lead = merchant_salutation(resolved.category, merchant)
-        customer_name = customer_salutation(customer)
+        lead = opening_name(resolved.category, merchant)
+        customer_name = patron_name(customer)
         merchant_name = self._merchant_name(merchant)
         active_offer = resolved.flags.get("active_offer_titles", [""])[0] if resolved.flags.get("active_offer_titles") else ""
         fact_texts = self._interesting_fact_texts(plan)
         prefers_hinglish = self._prefers_hinglish(merchant, customer)
 
-        if plan.trigger_family == "research":
+        if plan.trigger_family == "insight":
             headline = fact_texts[0] if fact_texts else "this week's update"
             source = next((fact.text for fact in plan.evidence_facts if "source" in fact.label), "")
             action = next(
@@ -1439,13 +1442,13 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                 body = f"{body} - {source}"
             return body, plan.rationale_seed
 
-        if plan.trigger_family == "event":
+        if plan.trigger_family == "occasion":
             return self._fallback_event(plan, resolved, lead, payload, prefers_hinglish)
 
-        if plan.trigger_family == "performance":
+        if plan.trigger_family == "metric":
             return self._fallback_performance(plan, resolved, lead, payload, prefers_hinglish)
 
-        if plan.trigger_family == "account":
+        if plan.trigger_family == "renewal":
             return self._fallback_account(plan, resolved, lead, payload, prefers_hinglish)
 
         if plan.trigger_family == "curiosity":
@@ -1470,10 +1473,10 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
                 f"{lead}, switching straight into draft mode for {topic}. Main first version concise aur editable rakhungi. Short draft pehle chahiye?",
             ), plan.rationale_seed
 
-        if plan.trigger_family == "customer_followup":
+        if plan.trigger_family == "patron":
             return self._fallback_customer_followup(plan, resolved, customer_name, merchant_name, active_offer, payload, prefers_hinglish)
 
-        if plan.trigger_family == "customer_sparse":
+        if plan.trigger_family == "patron_sparse":
             return self._fallback_customer_sparse(plan, resolved, customer_name, merchant_name, active_offer, prefers_hinglish)
 
         fallback_summary = ", ".join(fact_texts[:2]) if fact_texts else "there is one useful update"
@@ -1484,7 +1487,7 @@ Language rule: if primary_language_hint is hi-en mix, write in natural Hinglish 
         ), plan.rationale_seed
 
 
-def build_template_params(plan: MessagePlan, composed: ComposedMessage) -> list[str]:
+def build_template_params(plan: SendStrategy, composed: OutreachDraft) -> list[str]:
     sentences = [part.strip() for part in composed.body.split(".") if part.strip()]
     if not sentences:
         return plan.template_params_seed

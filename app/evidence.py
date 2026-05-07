@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.schemas import EvidenceFact, MessagePlan, ResolvedContext
-from app.voices import customer_salutation, merchant_salutation
+from app.schemas import ContextClue, SendStrategy, AssembledScene
+from app.voices import patron_name, opening_name
 
 
 PERCENTAGE_HINTS = {
@@ -23,7 +23,7 @@ PERCENTAGE_HINTS = {
     "decline",
 }
 
-DEDUPED_IDENTITY_LABELS = {"merchant_name", "merchant_salutation"}
+DEDUPED_IDENTITY_LABELS = {"merchant_name", "opening_name"}
 
 
 def _format_number(value: float) -> str:
@@ -74,9 +74,9 @@ def humanize_scalar(key: str, value: Any) -> str:
     return str(value)
 
 
-class EvidenceSelector:
-    def select(self, plan: MessagePlan, resolved: ResolvedContext) -> list[EvidenceFact]:
-        facts: list[EvidenceFact] = []
+class FactPicker:
+    def pick(self, plan: SendStrategy, resolved: AssembledScene) -> list[ContextClue]:
+        facts: list[ContextClue] = []
         trigger = resolved.trigger
         merchant = resolved.merchant
         category = resolved.category
@@ -88,7 +88,7 @@ class EvidenceSelector:
         facts.extend(self._customer_facts(plan, customer, merchant, category))
         facts.extend(self._category_facts(plan, category, merchant))
 
-        deduped: list[EvidenceFact] = []
+        deduped: list[ContextClue] = []
         seen: set[tuple[str, str]] = set()
         seen_labels: set[str] = set()
         for fact in facts:
@@ -102,69 +102,69 @@ class EvidenceSelector:
             deduped.append(fact)
         return deduped[:12]
 
-    def _trigger_payload_facts(self, payload: dict[str, Any], category: dict[str, Any]) -> list[EvidenceFact]:
-        facts: list[EvidenceFact] = []
+    def _trigger_payload_facts(self, payload: dict[str, Any], category: dict[str, Any]) -> list[ContextClue]:
+        facts: list[ContextClue] = []
         if payload.get("top_item_id"):
             digest_item = self._find_digest_item(category, payload["top_item_id"])
             if digest_item is not None:
-                facts.append(EvidenceFact("trigger_item_title", digest_item.get("title", ""), "trigger.digest"))
+                facts.append(ContextClue("trigger_item_title", digest_item.get("title", ""), "trigger.digest"))
                 if digest_item.get("source"):
-                    facts.append(EvidenceFact("trigger_item_source", digest_item["source"], "trigger.digest"))
+                    facts.append(ContextClue("trigger_item_source", digest_item["source"], "trigger.digest"))
                 if digest_item.get("summary"):
-                    facts.append(EvidenceFact("trigger_item_summary", digest_item["summary"], "trigger.digest"))
+                    facts.append(ContextClue("trigger_item_summary", digest_item["summary"], "trigger.digest"))
                 if digest_item.get("actionable"):
-                    facts.append(EvidenceFact("trigger_item_actionable", digest_item["actionable"], "trigger.digest"))
+                    facts.append(ContextClue("trigger_item_actionable", digest_item["actionable"], "trigger.digest"))
         if payload.get("digest_item_id"):
             digest_item = self._find_digest_item(category, payload["digest_item_id"])
             if digest_item is not None:
-                facts.append(EvidenceFact("digest_item_title", digest_item.get("title", ""), "trigger.digest"))
+                facts.append(ContextClue("digest_item_title", digest_item.get("title", ""), "trigger.digest"))
                 if digest_item.get("date"):
-                    facts.append(EvidenceFact("digest_item_date", digest_item["date"], "trigger.digest"))
+                    facts.append(ContextClue("digest_item_date", digest_item["date"], "trigger.digest"))
                 if digest_item.get("source"):
-                    facts.append(EvidenceFact("digest_item_source", digest_item["source"], "trigger.digest"))
+                    facts.append(ContextClue("digest_item_source", digest_item["source"], "trigger.digest"))
         if payload.get("available_slots"):
             labels = [slot.get("label", "") for slot in payload["available_slots"] if slot.get("label")]
             if labels:
-                facts.append(EvidenceFact("available_slots", "; ".join(labels[:3]), "trigger.payload"))
+                facts.append(ContextClue("available_slots", "; ".join(labels[:3]), "trigger.payload"))
         for key, value in payload.items():
             if key in {"placeholder", "metric_or_topic", "available_slots", "top_item_id", "digest_item_id"}:
                 continue
             if value is None:
                 continue
             if isinstance(value, (str, int, float, bool)):
-                facts.append(EvidenceFact(f"trigger_{key}", humanize_scalar(key, value), "trigger.payload"))
+                facts.append(ContextClue(f"trigger_{key}", humanize_scalar(key, value), "trigger.payload"))
             elif isinstance(value, list) and value and all(isinstance(item, str) for item in value):
-                facts.append(EvidenceFact(f"trigger_{key}", "; ".join(value[:4]), "trigger.payload"))
+                facts.append(ContextClue(f"trigger_{key}", "; ".join(value[:4]), "trigger.payload"))
         return facts
 
-    def _merchant_facts(self, plan: MessagePlan, resolved: ResolvedContext) -> list[EvidenceFact]:
+    def _merchant_facts(self, plan: SendStrategy, resolved: AssembledScene) -> list[ContextClue]:
         merchant = resolved.merchant
         category = resolved.category
         facts = [
-            EvidenceFact("merchant_salutation", merchant_salutation(category, merchant), "merchant.identity"),
-            EvidenceFact("merchant_name", merchant.get("identity", {}).get("name", ""), "merchant.identity"),
-            EvidenceFact("merchant_locality", merchant.get("identity", {}).get("locality", ""), "merchant.identity"),
+            ContextClue("opening_name", opening_name(category, merchant), "merchant.identity"),
+            ContextClue("merchant_name", merchant.get("identity", {}).get("name", ""), "merchant.identity"),
+            ContextClue("merchant_locality", merchant.get("identity", {}).get("locality", ""), "merchant.identity"),
         ]
-        performance = merchant.get("performance", {})
-        if plan.trigger_family in {"performance", "account", "event", "fallback"}:
+        performance = merchant.get("metric", {})
+        if plan.trigger_family in {"metric", "renewal", "occasion", "generic"}:
             for key in ("views", "calls", "directions", "ctr"):
                 if performance.get(key) is not None:
-                    facts.append(EvidenceFact(f"merchant_{key}", humanize_scalar(key, performance[key]), "merchant.performance"))
+                    facts.append(ContextClue(f"merchant_{key}", humanize_scalar(key, performance[key]), "merchant.performance"))
         subscription = merchant.get("subscription", {})
         if subscription.get("days_remaining") is not None:
-            facts.append(EvidenceFact("subscription_days_remaining", humanize_scalar("days_remaining", subscription["days_remaining"]), "merchant.subscription"))
+            facts.append(ContextClue("subscription_days_remaining", humanize_scalar("days_remaining", subscription["days_remaining"]), "merchant.subscription"))
         if subscription.get("status"):
-            facts.append(EvidenceFact("subscription_status", subscription["status"], "merchant.subscription"))
+            facts.append(ContextClue("subscription_status", subscription["status"], "merchant.subscription"))
         active_offers = [offer.get("title", "") for offer in merchant.get("offers", []) if offer.get("status") == "active" and offer.get("title")]
         if active_offers:
-            facts.append(EvidenceFact("active_offers", "; ".join(active_offers[:3]), "merchant.offers"))
+            facts.append(ContextClue("active_offers", "; ".join(active_offers[:3]), "merchant.offers"))
         signals = merchant.get("signals", [])
         if signals:
-            facts.append(EvidenceFact("merchant_signals", "; ".join(signals[:4]), "merchant.signals"))        # 7d performance deltas — used for trend hooks and compulsion ("calls up 15% this week")
+            facts.append(ContextClue("merchant_signals", "; ".join(signals[:4]), "merchant.signals"))        # 7d performance deltas — used for trend hooks and compulsion ("calls up 15% this week")
         delta_7d = performance.get("delta_7d", {}) or {}
         for key in ("views_pct", "calls_pct"):
             if delta_7d.get(key) is not None:
-                facts.append(EvidenceFact(f"perf_delta_7d_{key}", humanize_scalar(key, delta_7d[key]), "merchant.performance.delta_7d"))
+                facts.append(ContextClue(f"perf_delta_7d_{key}", humanize_scalar(key, delta_7d[key]), "merchant.performance.delta_7d"))
         # Review themes — for engagement hooks and voice matching
         for rt in merchant.get("review_themes", [])[:2]:
             theme = rt.get("theme", "")
@@ -175,74 +175,74 @@ class EvidenceSelector:
                 quote = rt.get("common_quote", "")
                 if quote:
                     theme_text += f' — "{quote}"'
-                facts.append(EvidenceFact("review_theme", theme_text, "merchant.review_themes"))
+                facts.append(ContextClue("review_theme", theme_text, "merchant.review_themes"))
         history = merchant.get("conversation_history", [])
         if history:
             last_turn = history[-1]
             if last_turn.get("body"):
-                facts.append(EvidenceFact("last_conversation_turn", last_turn["body"], "merchant.history"))
+                facts.append(ContextClue("last_conversation_turn", last_turn["body"], "merchant.history"))
         aggregate = merchant.get("customer_aggregate", {})
         for key, value in aggregate.items():
             if isinstance(value, (str, int, float, bool)):
-                facts.append(EvidenceFact(f"customer_aggregate_{key}", humanize_scalar(key, value), "merchant.customer_aggregate"))
+                facts.append(ContextClue(f"customer_aggregate_{key}", humanize_scalar(key, value), "merchant.customer_aggregate"))
         return facts
 
     def _customer_facts(
         self,
-        plan: MessagePlan,
+        plan: SendStrategy,
         customer: dict[str, Any] | None,
         merchant: dict[str, Any],
         category: dict[str, Any],
-    ) -> list[EvidenceFact]:
+    ) -> list[ContextClue]:
         if customer is None:
             return []
         relationship = customer.get("relationship", {})
         preferences = customer.get("preferences", {})
         facts = [
-            EvidenceFact("customer_name", customer_salutation(customer), "customer.identity"),
-            EvidenceFact("customer_language", str(customer.get("identity", {}).get("language_pref", "")), "customer.identity"),
-            EvidenceFact("customer_state", str(customer.get("state", "")), "customer.state"),
+            ContextClue("customer_name", patron_name(customer), "customer.identity"),
+            ContextClue("customer_language", str(customer.get("identity", {}).get("language_pref", "")), "customer.identity"),
+            ContextClue("customer_state", str(customer.get("state", "")), "customer.state"),
         ]
         for key in ("first_visit", "last_visit", "visits_total", "lifetime_value"):
             if relationship.get(key) is not None:
-                facts.append(EvidenceFact(f"relationship_{key}", humanize_scalar(key, relationship[key]), "customer.relationship"))
+                facts.append(ContextClue(f"relationship_{key}", humanize_scalar(key, relationship[key]), "customer.relationship"))
         for key, value in preferences.items():
             if isinstance(value, (str, int, float, bool)):
-                facts.append(EvidenceFact(f"customer_preference_{key}", humanize_scalar(key, value), "customer.preferences"))
+                facts.append(ContextClue(f"customer_preference_{key}", humanize_scalar(key, value), "customer.preferences"))
         services = relationship.get("services_received", [])
         if services:
-            facts.append(EvidenceFact("services_received", "; ".join(str(item) for item in services[:5]), "customer.relationship"))
+            facts.append(ContextClue("services_received", "; ".join(str(item) for item in services[:5]), "customer.relationship"))
         return facts
 
-    def _category_facts(self, plan: MessagePlan, category: dict[str, Any], merchant: dict[str, Any]) -> list[EvidenceFact]:
+    def _category_facts(self, plan: SendStrategy, category: dict[str, Any], merchant: dict[str, Any]) -> list[ContextClue]:
         peer_stats = category.get("peer_stats", {}) or {}
-        facts: list[EvidenceFact] = []
+        facts: list[ContextClue] = []
         # Peer benchmarks — used for loss-aversion hooks ("your CTR is below peer avg")
         # and social proof ("3 dentists in your locality...")
-        if plan.trigger_family in {"performance", "event", "fallback", "research", "account", "curiosity"}:
+        if plan.trigger_family in {"metric", "occasion", "generic", "insight", "renewal", "curiosity"}:
             if peer_stats.get("avg_ctr") is not None:
-                facts.append(EvidenceFact("peer_avg_ctr", humanize_scalar("avg_ctr", peer_stats["avg_ctr"]), "category.peer_stats"))
+                facts.append(ContextClue("peer_avg_ctr", humanize_scalar("avg_ctr", peer_stats["avg_ctr"]), "category.peer_stats"))
             if peer_stats.get("avg_review_count") is not None:
-                facts.append(EvidenceFact("peer_avg_review_count", humanize_scalar("avg_review_count", peer_stats["avg_review_count"]), "category.peer_stats"))
+                facts.append(ContextClue("peer_avg_review_count", humanize_scalar("avg_review_count", peer_stats["avg_review_count"]), "category.peer_stats"))
             if peer_stats.get("avg_rating") is not None:
-                facts.append(EvidenceFact("peer_avg_rating", humanize_scalar("avg_rating", peer_stats["avg_rating"]), "category.peer_stats"))
+                facts.append(ContextClue("peer_avg_rating", humanize_scalar("avg_rating", peer_stats["avg_rating"]), "category.peer_stats"))
             if peer_stats.get("avg_views_30d") is not None:
-                facts.append(EvidenceFact("peer_avg_views", humanize_scalar("avg_views_30d", peer_stats["avg_views_30d"]), "category.peer_stats"))
+                facts.append(ContextClue("peer_avg_views", humanize_scalar("avg_views_30d", peer_stats["avg_views_30d"]), "category.peer_stats"))
         # Seasonal beats — for why-now framing ("wedding whitening peak Oct-Dec")
-        if plan.trigger_family in {"curiosity", "event", "research", "performance", "customer_followup"}:
+        if plan.trigger_family in {"curiosity", "occasion", "insight", "metric", "patron"}:
             seasonal = category.get("seasonal_beats", [])
             for beat in seasonal[:2]:
                 note = beat.get("note", "")
                 if note:
                     month = beat.get("month", "")
                     label = f"seasonal_{month.replace('-', '_')}" if month else "seasonal_note"
-                    facts.append(EvidenceFact(label, note, "category.seasonal_beats"))
+                    facts.append(ContextClue(label, note, "category.seasonal_beats"))
         # Trend signals — for research/event urgency framing
-        if plan.trigger_family in {"event", "research", "curiosity"}:
+        if plan.trigger_family in {"occasion", "insight", "curiosity"}:
             for sig in category.get("trend_signals", [])[:2]:
                 text = str(sig.get("signal", sig))[:120]
                 if text:
-                    facts.append(EvidenceFact("trend_signal", text, "category.trend_signals"))
+                    facts.append(ContextClue("trend_signal", text, "category.trend_signals"))
         return facts
 
     def _find_digest_item(self, category: dict[str, Any], item_id: str) -> dict[str, Any] | None:

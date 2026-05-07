@@ -3,11 +3,10 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.main import app, compose_service, resolver, settings, store
-from app.evidence import EvidenceFact
-from app.schemas import LLMReplyDecision
-from app.schemas import ComposedMessage, MessagePlan, ResolvedContext
+from app.schemas import ContextClue
+from app.schemas import OutreachDraft, SendStrategy, AssembledScene
 from app.store import utc_now_iso
-from app.validator import MessageValidator
+from app.validator import OutputGuard
 
 
 client = TestClient(app)
@@ -18,7 +17,7 @@ def setup_function() -> None:
 
 
 def _seed_context(scope: str, context_id: str, payload: dict) -> None:
-    result = store.upsert_context(scope, context_id, 1, payload)
+    result = store.accept(scope, context_id, 1, payload)
     assert result.accepted is True
 
 
@@ -181,7 +180,7 @@ def _seed_customer_sparse_contexts() -> None:
 def test_reply_auto_reply_progression() -> None:
     conversation_id = "conv_auto"
     suppression_key = "auto:conv_auto"
-    store.create_conversation(
+    store.open_thread(
         conversation_id=conversation_id,
         merchant_id="m_auto",
         customer_id=None,
@@ -202,7 +201,7 @@ def test_reply_auto_reply_progression() -> None:
 
     first = client.post("/v1/reply", json=body)
 
-    record = store.get_conversation(conversation_id)
+    record = store.get_thread(conversation_id)
     assert first.status_code == 200
     assert record is not None
     assert first.json()["action"] == "end"
@@ -213,7 +212,7 @@ def test_reply_auto_reply_progression() -> None:
 def test_reply_commit_switches_to_action_mode() -> None:
     _seed_action_mode_contexts()
     conversation_id = "conv_commit"
-    store.create_conversation(
+    store.open_thread(
         conversation_id=conversation_id,
         merchant_id="m_action",
         customer_id=None,
@@ -244,7 +243,7 @@ def test_reply_commit_switches_to_action_mode() -> None:
 def test_reply_abusive_message_ends_and_suppresses() -> None:
     conversation_id = "conv_abusive"
     suppression_key = "abusive:conv_abusive"
-    store.create_conversation(
+    store.open_thread(
         conversation_id=conversation_id,
         merchant_id="m_abusive",
         customer_id=None,
@@ -267,7 +266,7 @@ def test_reply_abusive_message_ends_and_suppresses() -> None:
         },
     )
 
-    record = store.get_conversation(conversation_id)
+    record = store.get_thread(conversation_id)
     assert response.status_code == 200
     assert response.json()["action"] == "end"
     assert record is not None
@@ -278,7 +277,7 @@ def test_reply_abusive_message_ends_and_suppresses() -> None:
 def test_reply_off_topic_redirects() -> None:
     _seed_action_mode_contexts()
     conversation_id = "conv_tax"
-    store.create_conversation(
+    store.open_thread(
         conversation_id=conversation_id,
         merchant_id="m_action",
         customer_id=None,
@@ -309,7 +308,7 @@ def test_reply_off_topic_redirects() -> None:
 def test_reply_busy_message_returns_wait() -> None:
     _seed_action_mode_contexts()
     conversation_id = "conv_busy"
-    store.create_conversation(
+    store.open_thread(
         conversation_id=conversation_id,
         merchant_id="m_action",
         customer_id=None,
@@ -340,7 +339,7 @@ def test_reply_busy_message_returns_wait() -> None:
 def test_reply_accountant_question_does_not_use_generic_question_fallback() -> None:
     _seed_action_mode_contexts()
     conversation_id = "conv_accountant"
-    store.create_conversation(
+    store.open_thread(
         conversation_id=conversation_id,
         merchant_id="m_action",
         customer_id=None,
@@ -372,7 +371,7 @@ def test_reply_accountant_question_does_not_use_generic_question_fallback() -> N
 def test_reply_repairs_generic_placeholder_after_commit(monkeypatch) -> None:
     _seed_action_mode_contexts()
     conversation_id = "conv_commit_repair"
-    store.create_conversation(
+    store.open_thread(
         conversation_id=conversation_id,
         merchant_id="m_action",
         customer_id=None,
@@ -414,10 +413,10 @@ def test_reply_repairs_generic_placeholder_after_commit(monkeypatch) -> None:
 
 def test_compose_gbp_unverified_humanizes_account_message() -> None:
     _seed_gbp_contexts()
-    resolved = resolver.resolve_trigger_id("trg_gbp")
+    resolved = resolver.load_for_trigger("trg_gbp")
 
     assert resolved is not None
-    composed = compose_service.compose_resolved(resolved)
+    composed = compose_service.draft(resolved)
 
     assert composed.send_as == "vera"
     body_lower = composed.body.lower()
@@ -429,10 +428,10 @@ def test_compose_gbp_unverified_humanizes_account_message() -> None:
 
 def test_compose_customer_sparse_uses_safe_deterministic_reminder() -> None:
     _seed_customer_sparse_contexts()
-    resolved = resolver.resolve_trigger_id("trg_sparse")
+    resolved = resolver.load_for_trigger("trg_sparse")
 
     assert resolved is not None
-    composed = compose_service.compose_resolved(resolved)
+    composed = compose_service.draft(resolved)
 
     assert composed.send_as == "merchant_on_behalf"
     assert "appointment tomorrow" in composed.body
@@ -442,27 +441,27 @@ def test_compose_customer_sparse_uses_safe_deterministic_reminder() -> None:
 
 
 def test_validator_allows_humanized_date_from_iso_fact() -> None:
-    validator = MessageValidator()
-    plan = MessagePlan(
-        trigger_family="research",
+    validator = OutputGuard()
+    plan = SendStrategy(
+        trigger_family="insight",
         audience="merchant",
         send_as="vera",
         primary_goal="share one research update",
         cta_type="open_ended",
         template_name="vera_research_v1",
         evidence_facts=[
-            EvidenceFact("digest_item_date", "2026-05-02T19:00:00+05:30", "trigger.digest"),
-            EvidenceFact("digest_item_title", "IDA Delhi: Digital impressions", "trigger.digest"),
+            ContextClue("digest_item_date", "2026-05-02T19:00:00+05:30", "trigger.digest"),
+            ContextClue("digest_item_title", "IDA Delhi: Digital impressions", "trigger.digest"),
         ],
     )
-    resolved = ResolvedContext(
+    resolved = AssembledScene(
         category={"voice": {"vocab_taboo": []}},
         merchant={"offers": []},
         trigger={"kind": "research_digest", "payload": {}},
         customer=None,
         flags={"active_offer_titles": []},
     )
-    composed = ComposedMessage(
+    composed = OutreachDraft(
         body="Dr. Meera, IDA Delhi is hosting this on May 2, 2026 at 7pm.",
         cta="open_ended",
         send_as="vera",
@@ -472,6 +471,6 @@ def test_validator_allows_humanized_date_from_iso_fact() -> None:
         template_params=[],
     )
 
-    issues = validator.validate(composed, plan, resolved)
+    issues = validator.check(composed, plan, resolved)
 
     assert not any(issue.startswith("unsupported_numbers:") for issue in issues)

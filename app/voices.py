@@ -25,7 +25,7 @@ def _dentist_salutation(name: str, owner: str | None) -> str:
     return name
 
 
-def merchant_salutation(category: dict[str, Any], merchant: dict[str, Any]) -> str:
+def opening_name(category: dict[str, Any], merchant: dict[str, Any]) -> str:
     identity = merchant.get("identity", {})
     name = identity.get("name", "there")
     owner = identity.get("owner_first_name")
@@ -34,13 +34,13 @@ def merchant_salutation(category: dict[str, Any], merchant: dict[str, Any]) -> s
     return owner or name
 
 
-def customer_salutation(customer: dict[str, Any] | None) -> str:
+def patron_name(customer: dict[str, Any] | None) -> str:
     if customer is None:
         return "there"
     return customer.get("identity", {}).get("name", "there")
 
 
-def language_hint(merchant: dict[str, Any], customer: dict[str, Any] | None) -> str:
+def detect_language(merchant: dict[str, Any], customer: dict[str, Any] | None) -> str:
     if customer is not None:
         pref = customer.get("identity", {}).get("language_pref")
         if pref:
@@ -53,12 +53,12 @@ def language_hint(merchant: dict[str, Any], customer: dict[str, Any] | None) -> 
     return "en"
 
 
-def build_tone_profile(category: dict[str, Any], merchant: dict[str, Any], customer: dict[str, Any] | None) -> list[str]:
+def voice_settings(category: dict[str, Any], merchant: dict[str, Any], customer: dict[str, Any] | None) -> list[str]:
     voice = category.get("voice", {})
     profile = [
         f"Tone: {voice.get('tone', 'clear_helpful')}",
         f"Register: {voice.get('register', 'peer')}",
-        f"Language hint: {language_hint(merchant, customer)}",
+        f"Language hint: {detect_language(merchant, customer)}",
     ]
     code_mix = voice.get("code_mix")
     if code_mix:

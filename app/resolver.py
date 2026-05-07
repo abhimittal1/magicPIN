@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.schemas import ResolvedContext
-from app.store import RuntimeStore
+from app.schemas import AssembledScene
+from app.store import AgentMemory
 
 
-TRIGGER_CATEGORY_MAP = {
+KIND_SCOPE_MAP = {
     "appointment_tomorrow": {"dentists", "salons", "gyms"},
     "chronic_refill_due": {"pharmacies"},
     "recall_due": {"dentists", "pharmacies"},
@@ -16,44 +16,44 @@ TRIGGER_CATEGORY_MAP = {
 }
 
 
-class ContextResolver:
-    def __init__(self, store: RuntimeStore) -> None:
+class SceneLoader:
+    def __init__(self, store: AgentMemory) -> None:
         self.store = store
 
-    def resolve_trigger_id(self, trigger_id: str) -> ResolvedContext | None:
-        trigger = self.store.get_context("trigger", trigger_id)
+    def load_for_trigger(self, trigger_id: str) -> AssembledScene | None:
+        trigger = self.store.fetch("trigger", trigger_id)
         if trigger is None:
             return None
         merchant_id = trigger.get("merchant_id")
         if not merchant_id:
             return None
-        merchant = self.store.get_context("merchant", merchant_id)
+        merchant = self.store.fetch("merchant", merchant_id)
         if merchant is None:
             return None
         category_slug = merchant.get("category_slug")
         if not category_slug:
             return None
-        category = self.store.get_context("category", category_slug)
+        category = self.store.fetch("category", category_slug)
         if category is None:
             return None
         customer = None
         customer_id = trigger.get("customer_id")
         if customer_id:
-            customer = self.store.get_context("customer", customer_id)
-        return self.resolve_contexts(category, merchant, trigger, customer)
+            customer = self.store.fetch("customer", customer_id)
+        return self.assemble(category, merchant, trigger, customer)
 
-    def resolve_contexts(
+    def assemble(
         self,
         category: dict[str, Any],
         merchant: dict[str, Any],
         trigger: dict[str, Any],
         customer: dict[str, Any] | None,
-    ) -> ResolvedContext:
+    ) -> AssembledScene:
         payload = trigger.get("payload", {}) or {}
         active_offers = [offer for offer in merchant.get("offers", []) if offer.get("status") == "active"]
         category_slug = category.get("slug", "")
         trigger_kind = trigger.get("kind", "")
-        allowed_categories = TRIGGER_CATEGORY_MAP.get(trigger_kind)
+        allowed_categories = KIND_SCOPE_MAP.get(trigger_kind)
         placeholder_payload = bool(payload.get("placeholder")) or payload == {"placeholder": True}
         mismatch_kind = trigger_kind if allowed_categories and category_slug not in allowed_categories else None
         category_trigger_mismatch = mismatch_kind is not None
@@ -67,7 +67,7 @@ class ContextResolver:
             "customer_opted_in": customer_opted_in,
             "needs_sparse_fallback": placeholder_payload or category_trigger_mismatch,
         }
-        return ResolvedContext(
+        return AssembledScene(
             category=category,
             merchant=merchant,
             trigger=trigger,
@@ -75,15 +75,15 @@ class ContextResolver:
             flags=flags,
         )
 
-    def resolve_merchant_id(self, merchant_id: str) -> ResolvedContext | None:
+    def load_for_merchant(self, merchant_id: str) -> AssembledScene | None:
         """Resolve category + merchant without a trigger — used for reply context lookups."""
-        merchant = self.store.get_context("merchant", merchant_id)
+        merchant = self.store.fetch("merchant", merchant_id)
         if merchant is None:
             return None
         category_slug = merchant.get("category_slug")
         if not category_slug:
             return None
-        category = self.store.get_context("category", category_slug)
+        category = self.store.fetch("category", category_slug)
         if category is None:
             return None
-        return self.resolve_contexts(category, merchant, {}, None)
+        return self.assemble(category, merchant, {}, None)

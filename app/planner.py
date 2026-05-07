@@ -1,26 +1,39 @@
 from __future__ import annotations
 
-from app.schemas import MessagePlan, ResolvedContext
-from app.voices import build_tone_profile
+from app.schemas import SendStrategy, AssembledScene
+from app.voices import voice_settings
 
 
-RESEARCH_KINDS = {"research_digest", "regulation_change", "cde_opportunity"}
-EVENT_KINDS = {"festival_upcoming", "ipl_match_today", "competitor_opened", "category_seasonal", "supply_alert"}
-PERFORMANCE_KINDS = {"perf_dip", "perf_spike", "milestone_reached", "review_theme_emerged", "seasonal_perf_dip"}
-ACCOUNT_KINDS = {"renewal_due", "gbp_unverified", "winback_eligible", "dormant_with_vera"}
-CUSTOMER_KINDS = {
-    "recall_due",
-    "customer_lapsed_soft",
-    "customer_lapsed_hard",
-    "appointment_tomorrow",
-    "trial_followup",
-    "chronic_refill_due",
-    "wedding_package_followup",
+TRIGGER_DISPATCH: dict[str, str] = {
+    "research_digest":          "insight",
+    "regulation_change":        "insight",
+    "cde_opportunity":          "insight",
+    "festival_upcoming":        "occasion",
+    "ipl_match_today":          "occasion",
+    "competitor_opened":        "occasion",
+    "category_seasonal":        "occasion",
+    "supply_alert":             "occasion",
+    "perf_dip":                 "metric",
+    "perf_spike":               "metric",
+    "milestone_reached":        "metric",
+    "review_theme_emerged":     "metric",
+    "seasonal_perf_dip":        "metric",
+    "renewal_due":              "renewal",
+    "gbp_unverified":           "renewal",
+    "winback_eligible":         "renewal",
+    "dormant_with_vera":        "renewal",
+    "recall_due":               "patron",
+    "customer_lapsed_soft":     "patron",
+    "customer_lapsed_hard":     "patron",
+    "appointment_tomorrow":     "patron",
+    "trial_followup":           "patron",
+    "chronic_refill_due":       "patron",
+    "wedding_package_followup": "patron",
 }
 
 
-class PlanBuilder:
-    def build(self, resolved: ResolvedContext) -> MessagePlan:
+class StrategyEngine:
+    def strategize(self, resolved: AssembledScene) -> SendStrategy:
         trigger = resolved.trigger
         merchant = resolved.merchant
         category = resolved.category
@@ -31,24 +44,16 @@ class PlanBuilder:
             family = "planning"
         elif trigger_kind == "curious_ask_due":
             family = "curiosity"
-        elif trigger_kind in RESEARCH_KINDS:
-            family = "research"
-        elif trigger_kind in EVENT_KINDS:
-            family = "event"
-        elif trigger_kind in PERFORMANCE_KINDS:
-            family = "performance"
-        elif trigger_kind in ACCOUNT_KINDS:
-            family = "account"
-        elif trigger_kind in CUSTOMER_KINDS or trigger.get("scope") == "customer":
-            family = "customer_followup"
         else:
-            family = "fallback"
+            family = TRIGGER_DISPATCH.get(trigger_kind) or (
+                "patron" if trigger.get("scope") == "customer" else "generic"
+            )
 
         if sparse_trigger:
-            if family == "customer_followup":
-                family = "customer_sparse"
-            elif family not in {"planning", "curiosity", "research", "event", "performance", "account"}:
-                family = "fallback"
+            if family == "patron":
+                family = "patron_sparse"
+            elif family not in {"planning", "curiosity", "insight", "occasion", "metric", "renewal"}:
+                family = "generic"
 
         send_as = "merchant_on_behalf" if trigger.get("scope") == "customer" else "vera"
         cta_type = self._cta_type(family, resolved)
@@ -64,7 +69,7 @@ class PlanBuilder:
         if customer is not None and not resolved.flags.get("customer_opted_in"):
             risk_flags.append("customer_no_opt_in")
 
-        return MessagePlan(
+        return SendStrategy(
             trigger_family=family,
             audience="customer" if customer is not None else "merchant",
             send_as=send_as,
@@ -73,19 +78,19 @@ class PlanBuilder:
             template_name=template_name,
             template_params_seed=[merchant.get("identity", {}).get("name", "")],
             rationale_seed=rationale_seed,
-            tone_profile=build_tone_profile(category, merchant, customer),
+            tone_profile=voice_settings(category, merchant, customer),
             risk_flags=risk_flags,
         )
 
-    def _cta_type(self, family: str, resolved: ResolvedContext) -> str:
+    def _cta_type(self, family: str, resolved: AssembledScene) -> str:
         payload = resolved.trigger.get("payload", {}) or {}
-        if family == "customer_followup" and payload.get("available_slots"):
+        if family == "patron" and payload.get("available_slots"):
             return "multi_choice_slot"
-        if family in {"planning", "account"}:
+        if family in {"planning", "renewal"}:
             return "binary_yes_no"
-        if family == "customer_sparse":
+        if family == "patron_sparse":
             return "open_ended"
-        if family == "event" and resolved.trigger.get("kind") == "supply_alert":
+        if family == "occasion" and resolved.trigger.get("kind") == "supply_alert":
             return "binary_yes_no"
         return "open_ended"
 
@@ -93,22 +98,22 @@ class PlanBuilder:
         prefix = "merchant" if send_as == "merchant_on_behalf" else "vera"
         return f"{prefix}_{family}_v1"
 
-    def _primary_goal(self, family: str, trigger_kind: str, resolved: ResolvedContext) -> str:
+    def _primary_goal(self, family: str, trigger_kind: str, resolved: AssembledScene) -> str:
         if resolved.flags.get("mismatch_kind"):
             return f"acknowledge the {trigger_kind} signal safely without inventing category-specific details"
-        if resolved.flags.get("placeholder_payload") and family == "event":
+        if resolved.flags.get("placeholder_payload") and family == "occasion":
             return "turn a sparse event signal into one practical next step without inventing dates or offers"
-        if resolved.flags.get("placeholder_payload") and family == "performance":
+        if resolved.flags.get("placeholder_payload") and family == "metric":
             return "turn a sparse performance signal into one safe action without inventing metrics"
-        if resolved.flags.get("placeholder_payload") and family == "account":
+        if resolved.flags.get("placeholder_payload") and family == "renewal":
             return "make the account issue concrete without pretending there is missing setup data"
         if family == "planning":
             return "move directly from intent to a concrete draft — do not re-qualify, give the artifact or the next executable step immediately"
         if family == "curiosity":
             return "open with a specific low-friction question and pre-commit to a concrete artifact in return (e.g., 'I'll turn your answer into a 4-line GBP post')"
-        if family == "research":
+        if family == "insight":
             return "lead with the cited fact as a hook, explain the one practical implication for this merchant, then offer a concrete next step; use peer/compliance data when available"
-        if family == "event":
+        if family == "occasion":
             if trigger_kind == "ipl_match_today":
                 return "lead with a counter-intuitive or loss-aversion insight about IPL impact on covers/orders; reference the merchant's active offer; end with a specific effort-capped CTA ('10 min')"
             if trigger_kind == "festival_upcoming":
@@ -118,7 +123,7 @@ class PlanBuilder:
             if trigger_kind == "supply_alert":
                 return "state the exact SKU/product risk and the recommended action clearly; frame as patient-safety or compliance urgency, not just stock management"
             return "lead with the single strongest why-now hook from the trigger; add one category-specific insight; end with an effort-capped CTA"
-        if family == "performance":
+        if family == "metric":
             if trigger_kind in {"perf_dip", "seasonal_perf_dip"}:
                 return "compare the dip to the peer benchmark from approved facts; propose one specific recovery action tied to the merchant's offers or content calendar; frame as 'here is the likely fix'"
             if trigger_kind == "perf_spike":
@@ -126,19 +131,19 @@ class PlanBuilder:
             if trigger_kind == "milestone_reached":
                 return "congratulate briefly then immediately pivot to ONE concrete next-step action (GBP post + broadcast, not a question); make the action feel low-effort and time-bounded"
             return "explain the metric movement with one data anchor and suggest one specific action"
-        if family == "customer_followup":
+        if family == "patron":
             return "send a precise, warm reminder that uses the customer's name, references the specific service/slot/offer, and ends with a single easy reply-prompt"
-        if family == "customer_sparse":
+        if family == "patron_sparse":
             return "send a cautious continuity follow-up without inventing missing logistics"
-        if family == "account":
+        if family == "renewal":
             return "make the account issue concrete and propose one clear next step with a binary yes/no CTA"
         return f"handle {trigger_kind} safely without inventing details"
 
-    def _rationale_seed(self, family: str, trigger_kind: str, resolved: ResolvedContext) -> str:
+    def _rationale_seed(self, family: str, trigger_kind: str, resolved: AssembledScene) -> str:
         merchant_name = resolved.merchant.get("identity", {}).get("name", "merchant")
         if family == "planning":
             return f"{merchant_name} already expressed planning intent, so the reply must switch into action mode immediately."
-        if family == "customer_sparse":
+        if family == "patron_sparse":
             if trigger_kind in {"appointment_tomorrow", "chronic_refill_due", "recall_due"}:
                 return "This reminder trigger is sparse, so keep the note warm, short, and limited to confirmation or simple follow-up."
             return "This trigger is sparse, so the message should stay conservative and rely only on customer state plus merchant identity."
@@ -146,6 +151,6 @@ class PlanBuilder:
         if mismatch_kind:
             category_slug = resolved.category.get("slug", "this category")
             return f"The {mismatch_kind} trigger does not cleanly fit the {category_slug} category here, so stay generic and avoid unsupported operational details."
-        if resolved.flags.get("placeholder_payload") and family in {"event", "performance", "account"}:
+        if resolved.flags.get("placeholder_payload") and family in {"occasion", "metric", "renewal"}:
             return f"The {trigger_kind} trigger is placeholder-driven, so acknowledge the signal and suggest a next step without inventing specifics."
         return f"This message is driven by the {trigger_kind} trigger and should stay grounded in the pushed context."

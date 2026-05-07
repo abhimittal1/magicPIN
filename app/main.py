@@ -6,32 +6,32 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from app.composer import ComposeService
+from app.composer import OutreachEngine
 from app.config import get_settings
-from app.evidence import EvidenceSelector
-from app.llm_client import WordingService
-from app.planner import PlanBuilder
-from app.ranker import TriggerRanker
-from app.reply_classifier import ReplyClassifier
-from app.reply_manager import ReplyManager
-from app.resolver import ContextResolver
+from app.evidence import FactPicker
+from app.llm_client import LLMWriter
+from app.planner import StrategyEngine
+from app.ranker import ActionPrioritizer
+from app.reply_classifier import IntentRouter
+from app.reply_manager import DialogHandler
+from app.resolver import SceneLoader
 from app.schemas import ContextPushRequest, ContextPushResponse, HealthzResponse, MetadataResponse, ReplyRequest, ReplyResponse, TickAction, TickRequest, TickResponse
-from app.store import RuntimeStore, utc_now_iso
-from app.validator import MessageValidator
+from app.store import AgentMemory, utc_now_iso
+from app.validator import OutputGuard
 
 
 settings = get_settings()
-store = RuntimeStore()
-resolver = ContextResolver(store)
-wording_service = WordingService(settings)
-compose_service = ComposeService(
-    planner=PlanBuilder(),
-    evidence_selector=EvidenceSelector(),
+store = AgentMemory()
+resolver = SceneLoader(store)
+wording_service = LLMWriter(settings)
+compose_service = OutreachEngine(
+    planner=StrategyEngine(),
+    evidence_selector=FactPicker(),
     wording_service=wording_service,
-    validator=MessageValidator(),
+    validator=OutputGuard(),
 )
-ranker = TriggerRanker()
-reply_manager = ReplyManager(store=store, resolver=resolver, classifier=ReplyClassifier(), settings=settings, wording_service=wording_service)
+ranker = ActionPrioritizer()
+reply_manager = DialogHandler(store=store, resolver=resolver, classifier=IntentRouter(), settings=settings, wording_service=wording_service)
 
 app = FastAPI(title="magicpin Challenge Bot")
 
@@ -39,7 +39,7 @@ app = FastAPI(title="magicpin Challenge Bot")
 @app.get("/v1/healthz", response_model=HealthzResponse)
 async def healthz() -> HealthzResponse:
     uptime = int((datetime.now(store.started_at.tzinfo) - store.started_at).total_seconds())
-    return HealthzResponse(status="ok", uptime_seconds=uptime, contexts_loaded=store.count_contexts())
+    return HealthzResponse(status="ok", uptime_seconds=uptime, contexts_loaded=store.tally())
 
 
 @app.get("/v1/metadata", response_model=MetadataResponse)
@@ -57,7 +57,7 @@ async def metadata() -> MetadataResponse:
 
 @app.post("/v1/context", response_model=ContextPushResponse)
 async def push_context(body: ContextPushRequest) -> ContextPushResponse:
-    result = store.upsert_context(body.scope, body.context_id, body.version, body.payload)
+    result = store.accept(body.scope, body.context_id, body.version, body.payload)
     if not result.accepted:
         response = ContextPushResponse(
             accepted=False,
@@ -77,25 +77,25 @@ async def push_context(body: ContextPushRequest) -> ContextPushResponse:
 async def tick(body: TickRequest) -> TickResponse:
     candidates: list[tuple[float, str]] = []
     for trigger_id in body.available_triggers:
-        resolved = resolver.resolve_trigger_id(trigger_id)
+        resolved = resolver.load_for_trigger(trigger_id)
         if resolved is None:
             continue
         suppression_key = resolved.trigger.get("suppression_key")
         if store.is_suppressed(suppression_key):
             continue
-        plan = compose_service.plan(resolved)
-        score = ranker.score(resolved, plan)
+        plan = compose_service.strategize(resolved)
+        score = ranker.rank(resolved, plan)
         candidates.append((score, trigger_id))
 
     actions: list[TickAction] = []
     effective_limit = min(max(settings.max_actions_per_tick, len(candidates)), 20)
     for _, trigger_id in sorted(candidates, key=lambda item: item[0], reverse=True)[:effective_limit]:
-        resolved = resolver.resolve_trigger_id(trigger_id)
+        resolved = resolver.load_for_trigger(trigger_id)
         if resolved is None:
             continue
-        composed = compose_service.compose_resolved(resolved)
+        composed = compose_service.draft(resolved)
         conversation_id = f"conv_{uuid4().hex[:12]}"
-        record = store.create_conversation(
+        record = store.open_thread(
             conversation_id=conversation_id,
             merchant_id=resolved.trigger.get("merchant_id"),
             customer_id=resolved.trigger.get("customer_id"),
@@ -104,7 +104,7 @@ async def tick(body: TickRequest) -> TickResponse:
             suppression_key=composed.suppression_key,
             prompt_version=settings.prompt_version,
         )
-        store.add_turn(conversation_id, from_role="bot", message=composed.body, ts=utc_now_iso(), action="send")
+        store.append_entry(conversation_id, from_role="bot", message=composed.body, ts=utc_now_iso(), action="send")
         store.suppress(composed.suppression_key)
         actions.append(
             TickAction(
@@ -128,7 +128,7 @@ async def tick(body: TickRequest) -> TickResponse:
 @app.post("/v1/reply", response_model=ReplyResponse)
 async def reply(body: ReplyRequest) -> ReplyResponse:
     return ReplyResponse.model_validate(
-        reply_manager.handle(
+        reply_manager.process(
         conversation_id=body.conversation_id,
         merchant_id=body.merchant_id,
         customer_id=body.customer_id,

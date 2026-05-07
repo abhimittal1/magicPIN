@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from app.schemas import MessagePlan, ResolvedContext
+from app.schemas import SendStrategy, AssembledScene
 
 
-class TriggerRanker:
-    def score(self, resolved: ResolvedContext, plan: MessagePlan) -> float:
+class ActionPrioritizer:
+    def rank(self, resolved: AssembledScene, plan: SendStrategy) -> float:
         trigger = resolved.trigger
         urgency = float(trigger.get("urgency", 1))
         evidence_bonus = min(len(plan.evidence_facts), 6) * 0.35

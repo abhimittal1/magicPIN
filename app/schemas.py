@@ -91,12 +91,12 @@ class MetadataResponse(BaseModel):
     submitted_at: str
 
 
-class LLMDraft(BaseModel):
+class WriterOutput(BaseModel):
     body: str
     rationale: str
 
 
-class LLMReplyDecision(BaseModel):
+class WriterDecision(BaseModel):
     action: ReplyAction
     body: str | None = None
     rationale: str
@@ -104,14 +104,14 @@ class LLMReplyDecision(BaseModel):
 
 
 @dataclass(frozen=True)
-class EvidenceFact:
+class ContextClue:
     label: str
     text: str
     source: str
 
 
 @dataclass
-class MessagePlan:
+class SendStrategy:
     trigger_family: str
     audience: str
     send_as: SendAs
@@ -121,12 +121,12 @@ class MessagePlan:
     template_params_seed: list[str] = field(default_factory=list)
     rationale_seed: str = ""
     tone_profile: list[str] = field(default_factory=list)
-    evidence_facts: list[EvidenceFact] = field(default_factory=list)
+    evidence_facts: list[ContextClue] = field(default_factory=list)
     risk_flags: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
-class ResolvedContext:
+class AssembledScene:
     category: dict[str, Any]
     merchant: dict[str, Any]
     trigger: dict[str, Any]
@@ -135,7 +135,7 @@ class ResolvedContext:
 
 
 @dataclass
-class ComposedMessage:
+class OutreachDraft:
     body: str
     cta: str
     send_as: SendAs

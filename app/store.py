@@ -21,14 +21,14 @@ def parse_iso(value: str | None) -> datetime | None:
 
 
 @dataclass
-class VersionedContext:
+class ContextEntry:
     version: int
     payload: dict[str, Any]
     stored_at: str
 
 
 @dataclass(frozen=True)
-class ContextUpsertResult:
+class AcceptResult:
     accepted: bool
     current_version: int | None = None
     reason: str | None = None
@@ -36,7 +36,7 @@ class ContextUpsertResult:
 
 
 @dataclass
-class ConversationTurn:
+class MessageEntry:
     from_role: str
     message: str
     ts: str
@@ -44,7 +44,7 @@ class ConversationTurn:
 
 
 @dataclass
-class ConversationRecord:
+class ThreadRecord:
     conversation_id: str
     merchant_id: str | None = None
     customer_id: str | None = None
@@ -55,24 +55,24 @@ class ConversationRecord:
     auto_reply_hits: int = 0
     ended: bool = False
     prompt_version: str | None = None
-    turns: list[ConversationTurn] = field(default_factory=list)
+    turns: list[MessageEntry] = field(default_factory=list)
 
 
-class RuntimeStore:
+class AgentMemory:
     def __init__(self) -> None:
         self._lock = RLock()
-        self._contexts: dict[tuple[str, str], VersionedContext] = {}
-        self._conversations: dict[str, ConversationRecord] = {}
+        self._contexts: dict[tuple[str, str], ContextEntry] = {}
+        self._conversations: dict[str, ThreadRecord] = {}
         self._suppressed: set[str] = set()
         self.started_at = datetime.now(timezone.utc)
 
-    def upsert_context(self, scope: str, context_id: str, version: int, payload: dict[str, Any]) -> ContextUpsertResult:
+    def accept(self, scope: str, context_id: str, version: int, payload: dict[str, Any]) -> AcceptResult:
         with self._lock:
             key = (scope, context_id)
             current = self._contexts.get(key)
             if current is not None:
                 if version < current.version:
-                    return ContextUpsertResult(
+                    return AcceptResult(
                         accepted=False,
                         current_version=current.version,
                         reason="stale_version",
@@ -83,8 +83,8 @@ class RuntimeStore:
                     )
                 if version == current.version:
                     if current.payload == payload:
-                        return ContextUpsertResult(accepted=True, current_version=current.version)
-                    return ContextUpsertResult(
+                        return AcceptResult(accepted=True, current_version=current.version)
+                    return AcceptResult(
                         accepted=False,
                         current_version=current.version,
                         reason="same_version_conflict",
@@ -93,22 +93,22 @@ class RuntimeStore:
                             "that version is different. Reset the runtime store or resend with a higher version."
                         ),
                     )
-            self._contexts[key] = VersionedContext(version=version, payload=payload, stored_at=utc_now_iso())
-            return ContextUpsertResult(accepted=True, current_version=version)
+            self._contexts[key] = ContextEntry(version=version, payload=payload, stored_at=utc_now_iso())
+            return AcceptResult(accepted=True, current_version=version)
 
-    def get_context(self, scope: str, context_id: str) -> dict[str, Any] | None:
+    def fetch(self, scope: str, context_id: str) -> dict[str, Any] | None:
         with self._lock:
             entry = self._contexts.get((scope, context_id))
             return None if entry is None else entry.payload
 
-    def count_contexts(self) -> dict[str, int]:
+    def tally(self) -> dict[str, int]:
         counts = {"category": 0, "merchant": 0, "customer": 0, "trigger": 0}
         with self._lock:
             for scope, _ in self._contexts:
                 counts[scope] = counts.get(scope, 0) + 1
         return counts
 
-    def create_conversation(
+    def open_thread(
         self,
         conversation_id: str,
         merchant_id: str | None,
@@ -117,11 +117,11 @@ class RuntimeStore:
         send_as: str | None,
         suppression_key: str | None,
         prompt_version: str | None,
-    ) -> ConversationRecord:
+    ) -> ThreadRecord:
         with self._lock:
             record = self._conversations.get(conversation_id)
             if record is None:
-                record = ConversationRecord(
+                record = ThreadRecord(
                     conversation_id=conversation_id,
                     merchant_id=merchant_id,
                     customer_id=customer_id,
@@ -133,16 +133,16 @@ class RuntimeStore:
                 self._conversations[conversation_id] = record
             return record
 
-    def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
+    def get_thread(self, conversation_id: str) -> ThreadRecord | None:
         with self._lock:
             return self._conversations.get(conversation_id)
 
-    def add_turn(self, conversation_id: str, from_role: str, message: str, ts: str, action: str | None = None) -> None:
+    def append_entry(self, conversation_id: str, from_role: str, message: str, ts: str, action: str | None = None) -> None:
         with self._lock:
-            record = self._conversations.setdefault(conversation_id, ConversationRecord(conversation_id=conversation_id))
-            record.turns.append(ConversationTurn(from_role=from_role, message=message, ts=ts, action=action))
+            record = self._conversations.setdefault(conversation_id, ThreadRecord(conversation_id=conversation_id))
+            record.turns.append(MessageEntry(from_role=from_role, message=message, ts=ts, action=action))
 
-    def has_sent_body(self, conversation_id: str, body: str) -> bool:
+    def already_sent(self, conversation_id: str, body: str) -> bool:
         with self._lock:
             record = self._conversations.get(conversation_id)
             if record is None:
@@ -163,7 +163,7 @@ class RuntimeStore:
 
     def mark_wait(self, conversation_id: str, wait_until: str) -> None:
         with self._lock:
-            record = self._conversations.setdefault(conversation_id, ConversationRecord(conversation_id=conversation_id))
+            record = self._conversations.setdefault(conversation_id, ThreadRecord(conversation_id=conversation_id))
             record.wait_until = wait_until
 
     def is_waiting(self, conversation_id: str, now_iso: str) -> bool:
@@ -179,13 +179,13 @@ class RuntimeStore:
 
     def increment_auto_reply_hits(self, conversation_id: str) -> int:
         with self._lock:
-            record = self._conversations.setdefault(conversation_id, ConversationRecord(conversation_id=conversation_id))
+            record = self._conversations.setdefault(conversation_id, ThreadRecord(conversation_id=conversation_id))
             record.auto_reply_hits += 1
             return record.auto_reply_hits
 
     def mark_ended(self, conversation_id: str) -> None:
         with self._lock:
-            record = self._conversations.setdefault(conversation_id, ConversationRecord(conversation_id=conversation_id))
+            record = self._conversations.setdefault(conversation_id, ThreadRecord(conversation_id=conversation_id))
             record.ended = True
 
     def clear(self) -> None:
